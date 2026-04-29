@@ -1020,11 +1020,35 @@ class Parser {
   }
 
   private parseContextEntry(): { key: string; value: FeelNode } {
-    const t = this.next();
     let key: string;
-    if (t.kind === 'ident') key = t.name;
-    else if (t.kind === 'str') key = t.value;
-    else throw new Error('feel parse: expected context key');
+    const t = this.next();
+    if (t.kind === 'str') {
+      key = t.value;
+    } else if (t.kind === 'ident' || t.kind === 'kw') {
+      // Greedily consume idents/keywords/operators until the `:` that
+      // separates the key from the value. Adjacent idents pick up a
+      // joining space; operator-glued forms like `foo+bar` don't.
+      let key2 = t.kind === 'kw' ? t.name : t.name;
+      let lastWasIdent = true;
+      while (this.pos < this.tokens.length && !this.isPunct(':')) {
+        const next = this.tokens[this.pos];
+        if (next.kind === 'ident' || next.kind === 'kw') {
+          const name = next.kind === 'kw' ? next.name : next.name;
+          key2 += (lastWasIdent ? ' ' : '') + name;
+          lastWasIdent = true;
+          this.pos++;
+        } else if (next.kind === 'op') {
+          key2 += next.op;
+          lastWasIdent = false;
+          this.pos++;
+        } else {
+          break;
+        }
+      }
+      key = key2;
+    } else {
+      throw new Error('feel parse: expected context key');
+    }
     if (!this.isPunct(':')) throw new Error('feel parse: expected :');
     this.next();
     const value = this.parseExpression();
@@ -1233,10 +1257,33 @@ export function emitFeelNode(
     case 'list':
       return `[${node.items.map((i) => emitFeelNode(i, ctx)).join(', ')}]`;
     case 'context': {
-      const props = node.entries
-        .map((e) => `${JSON.stringify(e.key)}: ${emitFeelNode(e.value, ctx)}`)
-        .join(', ');
-      return `{ ${props} }`;
+      // Each entry's value can reference earlier entries by name. Emit a
+      // function-scoped block where the key becomes a `let` for backward
+      // references AND we collect the values into the returned object.
+      // Use a per-entry temp ident so duplicate keys / non-ident keys
+      // don't break JS scoping; assign to the named local for any key
+      // that is a valid JS ident (only the first declaration; subsequent
+      // duplicates reassign).
+      const lines: string[] = [];
+      const props: string[] = [];
+      const declared = new Set<string>();
+      for (let i = 0; i < node.entries.length; i++) {
+        const e = node.entries[i];
+        const tmp = `__ce_${i}`;
+        lines.push(`const ${tmp}: any = ${emitFeelNode(e.value, ctx)};`);
+        const baseIdent = toJsIdent(e.key);
+        const isValidIdent = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(baseIdent);
+        if (isValidIdent) {
+          if (declared.has(baseIdent)) {
+            lines.push(`${baseIdent} = ${tmp};`);
+          } else {
+            lines.push(`let ${baseIdent}: any = ${tmp};`);
+            declared.add(baseIdent);
+          }
+        }
+        props.push(`${JSON.stringify(e.key)}: ${tmp}`);
+      }
+      return `(() => { ${lines.join(' ')} return { ${props.join(', ')} }; })()`;
     }
     case 'index': {
       const filterCtx: CompileContext = { ...ctx, inFilterScope: true };
