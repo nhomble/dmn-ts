@@ -592,6 +592,12 @@ export const feel: any = {
     const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
     const def = itemDefs && itemDefs[local];
     if (def) {
+      // A `<functionItem>` typeRef requires the value to be callable. A
+      // non-function — even one that *looks* like the declared output —
+      // doesn't satisfy a function type.
+      if (def.isFunction) {
+        return typeof v === 'function' ? v : null;
+      }
       if (def.isCollection) {
         // FEEL singleton-list rule: a single non-list value flows into a
         // list-typed slot as a one-element list — but only at the top-level

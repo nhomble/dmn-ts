@@ -82,6 +82,11 @@ function emitItemDefsLiteral(model: DmnModel): string {
         .join(', ');
       fields.push(`components: [${comps}]`);
     }
+    if (it.isFunction) {
+      fields.push('isFunction: true');
+      if (it.functionOutputTypeRef)
+        fields.push(`functionOutputTypeRef: ${JSON.stringify(it.functionOutputTypeRef)}`);
+    }
     return `${JSON.stringify(it.name)}: { ${fields.join(', ')} }`;
   });
   return `{ ${props.join(', ')} }`;
@@ -687,6 +692,35 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
   const params = inputNames
     .map((n) => `${toJsIdent(n)}: any`)
     .join(', ');
+  // Look up declared types for each input — inputData has its own typeRef,
+  // input decisions get theirs from the corresponding decision's variable.
+  // At service entry we coerce each argument through `feel.validate`; a
+  // mismatched value lands as null in the service's evaluation context.
+  const inputTypes = new Map<string, string>();
+  for (const n of ds.inputData) {
+    const i = model.inputData.find((x) => x.name === n);
+    if (i?.typeRef) inputTypes.set(n, i.typeRef);
+  }
+  for (const n of ds.inputDecisions) {
+    const d = model.decisions.find((x) => x.name === n);
+    if (d?.typeRef) inputTypes.set(n, d.typeRef);
+  }
+  const inputCoercions = inputNames
+    .filter((n) => {
+      const t = inputTypes.get(n);
+      return (
+        t && (isScalarTypeRef(t) || model.itemDefinitions.some((it) => it.name === typeRefLocal(t)))
+      );
+    })
+    .map((n) => {
+      const ident = toJsIdent(n);
+      const t = inputTypes.get(n)!;
+      // FEEL spec: a value that doesn't conform to the declared type is
+      // silently coerced to null at the boundary. The singleton-list rule
+      // also applies — a one-element list flowing into a scalar slot
+      // unwraps to the element first.
+      return `${ident} = ${ident} === null || ${ident} === undefined ? ${ident} : feel.validate(feel.singleton(${ident}), ${JSON.stringify(t)}, __itemDefs);`;
+    });
   const ctxParts = inputNames
     .map((n) => `${JSON.stringify(n)}: ${toJsIdent(n)}`)
     .join(', ');
@@ -706,13 +740,14 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
     ds.outputDecisions.length === 1 &&
     model.dmnVersion !== '1.1' &&
     model.dmnVersion !== '1.2';
-  // Validate the unwrapped result against the service's declared typeRef
-  // (only meaningful when the service unwraps to a single output).
+  // Validate the result against the service's declared typeRef. Applies
+  // for both wrapped and unwrapped forms — e.g. a function-typed service
+  // (tDS_001 → string) rejects a non-function output.
   const wrapValidate = (expr: string) =>
-    ds.typeRef && unwrapsSingle ? `feel.validate(${expr}, ${JSON.stringify(ds.typeRef)}, __itemDefs)` : expr;
+    ds.typeRef ? `feel.validate(${expr}, ${JSON.stringify(ds.typeRef)}, __itemDefs)` : expr;
   const ret = unwrapsSingle
     ? `return ${wrapValidate(`decisions[${JSON.stringify(ds.outputDecisions[0])}](__svcCtx)`)};`
-    : `return { ${calls} };`;
+    : `return ${wrapValidate(`{ ${calls} }`)};`;
   const nullRet = `return null;`;
   // Reject when the call shape doesn't match the declared inputs — wrong
   // arity, or any required slot left as `undefined` (vs explicit null,
@@ -722,6 +757,7 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
     : '';
   const body = [
     `if (arguments.length !== ${arity}${undefinedCheck}) ${nullRet}`,
+    ...inputCoercions,
     `const __svcCtx: any = { ${ctxParts} };`,
     ret,
   ].join('\n  ');
@@ -738,20 +774,41 @@ function emitBkm(
   const params = bkm.parameters
     .map((p) => `${toJsIdent(p.name)}: any`)
     .join(', ');
-  // Validate typed parameters at the boundary — if any argument fails to
-  // satisfy its declared type, FEEL says the whole invocation is null.
+  // Validate typed parameters at the boundary. DMN 1.2 silently coerces a
+  // non-conforming argument to null and continues the body evaluation
+  // (so e.g. `arg != null` can still observe the coerced null). DMN 1.3+
+  // treats it as an error and short-circuits the whole invocation to null.
+  const coerceToNull = cctx.dmnVersion === '1.1' || cctx.dmnVersion === '1.2';
   const paramValidations: string[] = [];
   for (const p of bkm.parameters) {
     if (p.typeRef && (isScalarTypeRef(p.typeRef) || cctx.validatableTypes?.has(typeRefLocal(p.typeRef)))) {
       const ident = toJsIdent(p.name);
+      const onFail = coerceToNull ? `${ident} = null;` : 'return null;';
       paramValidations.push(
-        `if (${ident} !== undefined && ${ident} !== null && feel.validate(${ident}, ${JSON.stringify(p.typeRef)}, __itemDefs) === null) return null;`,
+        `if (${ident} !== undefined && ${ident} !== null && feel.validate(${ident}, ${JSON.stringify(p.typeRef)}, __itemDefs) === null) ${onFail}`,
       );
     }
   }
   const paramValidationBlock = paramValidations.length
     ? `  ${paramValidations.join('\n  ')}\n`
     : '';
+  // Wrap a body expression with the body-typeRef validation. DMN 1.2 puts
+  // the type on the BKM's `<variable typeRef="...">`; DMN 1.3+ moves it
+  // onto the `<literalExpression typeRef="...">`. Either way the
+  // singleton-list rule applies, so `[arg]` from a `number`-typed body
+  // unwraps to the scalar before validation.
+  const bodyType = bkm.bodyTypeRef ?? bkm.typeRef;
+  const wrapBody = (expr: string): string => {
+    if (
+      !bodyType ||
+      !(isScalarTypeRef(bodyType) || cctx.validatableTypes?.has(typeRefLocal(bodyType)))
+    ) {
+      return expr;
+    }
+    const isCollection = cctx.collectionTypes?.has(typeRefLocal(bodyType));
+    const inner = isCollection ? expr : `feel.singleton(${expr})`;
+    return `feel.validate(${inner}, ${JSON.stringify(bodyType)}, __itemDefs)`;
+  };
   // The body may itself be a FEEL function expression (`function(a) ...`).
   // Either way, the BKM is a callable: `bkm(...formalParams)` returns the
   // body value — which is a lambda when the body starts with `function(`.
@@ -760,14 +817,14 @@ function emitBkm(
     return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}${body.join('\n')}\n}`;
   }
   if (bkm.context) {
-    const value = emitContextValue(bkm.context, localNames, cctx);
+    const value = wrapBody(emitContextValue(bkm.context, localNames, cctx));
     return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}    return ${value};\n}`;
   }
   if (bkm.invocation) {
-    const expr = emitInvocationCall(bkm.invocation, localNames, cctx);
+    const expr = wrapBody(emitInvocationCall(bkm.invocation, localNames, cctx));
     return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}    return ${expr};\n}`;
   }
-  const body = text ? compileFeel(text, localNames, cctx) : 'undefined';
+  const body = text ? wrapBody(compileFeel(text, localNames, cctx)) : 'undefined';
   return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}  return ${body};\n}`;
 }
 

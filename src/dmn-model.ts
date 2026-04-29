@@ -59,6 +59,10 @@ export interface DmnBkm {
   id?: string;
   name: string;
   typeRef?: string;
+  // Optional `<literalExpression typeRef="...">` typeRef on the body —
+  // distinct from the BKM variable's typeRef; constrains the return value
+  // (with the FEEL singleton-list unwrap rule applied).
+  bodyTypeRef?: string;
   parameters: DmnBkmParameter[];
   bodyText?: string;
   decisionTable?: DmnDecisionTable;
@@ -113,6 +117,11 @@ export interface DmnItemDefinition {
   isCollection: boolean;
   allowedValues?: string[];
   components?: { name: string; typeRef?: string; isCollection?: boolean }[];
+  // `<functionItem outputTypeRef="...">` declares this type as a callable
+  // returning that type. A non-function value being validated against such
+  // a typeRef is rejected (returns null).
+  isFunction?: boolean;
+  functionOutputTypeRef?: string;
 }
 
 export interface DmnDecisionService {

@@ -316,6 +316,9 @@ export function parseDmn(xml: string): DmnModel {
     if (!bodyText && enc?.functionDefinition) {
       bodyText = functionDefToFeelText(enc.functionDefinition);
     }
+    // Body-level typeRef constrains the BKM's return value at call time.
+    const bodyTypeRef: string | undefined =
+      enc?.literalExpression?.['@_typeRef'] ?? enc?.['@_typeRef'];
     const bkmTable = enc?.decisionTable
       ? parseDecisionTableXml(enc.decisionTable)
       : undefined;
@@ -327,6 +330,7 @@ export function parseDmn(xml: string): DmnModel {
       id: n['@_id'],
       name: n['@_name'],
       typeRef: n.variable?.['@_typeRef'],
+      bodyTypeRef,
       parameters,
       bodyText,
       decisionTable: bkmTable,
@@ -422,6 +426,7 @@ export function parseDmn(xml: string): DmnModel {
   const itemDefinitionRaw = arr<any>(defs.itemDefinition);
   const itemDefinitions: DmnItemDefinition[] = itemDefinitionRaw.map((n) => {
     const ovText: string | undefined = n.allowedValues?.text;
+    const fi = n.functionItem;
     return {
       name: n['@_name'] ?? '',
       typeRef: n.typeRef ?? n.typeRef?.['#text'],
@@ -436,6 +441,8 @@ export function parseDmn(xml: string): DmnModel {
         typeRef: c.typeRef ?? c.typeRef?.['#text'],
         isCollection: c['@_isCollection'] === 'true',
       })),
+      isFunction: !!fi,
+      functionOutputTypeRef: fi?.['@_outputTypeRef'],
     };
   });
 
