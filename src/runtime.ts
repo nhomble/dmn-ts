@@ -1389,11 +1389,21 @@ export const feel: any = {
       return s.split(sep);
     }
   },
-  string_join(list: any, sep?: any): any {
-    list = feel.asList(list) as any;
+  string_join(list: any, sep?: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
+    // Singleton-list rule: a scalar string is treated as `[scalar]`.
+    if (typeof list === 'string') list = [list];
+    else list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
-    const s = sep == null || sep?.__named ? '' : String(sep);
-    return list.map((x) => (x == null ? '' : String(x))).join(s);
+    // Every element must be a string (or null, which is filtered out).
+    for (const x of list) {
+      if (x !== null && typeof x !== 'string') return null;
+    }
+    if (sep !== undefined && sep !== null && typeof sep !== 'string') return null;
+    const s = typeof sep === 'string' ? sep : '';
+    // Null elements are skipped, not stringified to "null"; the separator is
+    // also skipped between adjacent surviving elements.
+    return list.filter((x: any) => x !== null).join(s);
   },
   floor(...args: any[]): any {
     if (args.length !== 1) return null;
@@ -1456,32 +1466,38 @@ export const feel: any = {
   },
   // FEEL DMN 1.4+ rounding functions. Each scales by 10^scale, applies the
   // requested rounding mode, then scales back.
-  round_up(n: any, scale: any): any {
-    if (typeof n !== 'number' || typeof scale !== 'number') return null;
-    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+  // FEEL spec: scale must be in [-6111, 6176] (Java BigDecimal MathContext);
+  // out-of-range scales return null.
+  _checkRound(n: any, scale: any, ...rest: any[]): boolean {
+    if (rest.length > 0) return false;
+    if (typeof n !== 'number' || typeof scale !== 'number') return false;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return false;
+    const s = Math.trunc(scale);
+    if (s < -6111 || s > 6176) return false;
+    return true;
+  },
+  round_up(n: any, scale: any, ...rest: any[]): any {
+    if (!feel._checkRound(n, scale, ...rest)) return null;
     const f = Math.pow(10, Math.trunc(scale));
-    const x = n * f;
+    const x = (n as number) * f;
     return (x >= 0 ? Math.ceil(x) : Math.floor(x)) / f;
   },
-  round_down(n: any, scale: any): any {
-    if (typeof n !== 'number' || typeof scale !== 'number') return null;
-    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+  round_down(n: any, scale: any, ...rest: any[]): any {
+    if (!feel._checkRound(n, scale, ...rest)) return null;
     const f = Math.pow(10, Math.trunc(scale));
-    const x = n * f;
+    const x = (n as number) * f;
     return (x >= 0 ? Math.floor(x) : Math.ceil(x)) / f;
   },
-  round_half_up(n: any, scale: any): any {
-    if (typeof n !== 'number' || typeof scale !== 'number') return null;
-    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+  round_half_up(n: any, scale: any, ...rest: any[]): any {
+    if (!feel._checkRound(n, scale, ...rest)) return null;
     const f = Math.pow(10, Math.trunc(scale));
-    const x = n * f;
+    const x = (n as number) * f;
     return (x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5)) / f;
   },
-  round_half_down(n: any, scale: any): any {
-    if (typeof n !== 'number' || typeof scale !== 'number') return null;
-    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+  round_half_down(n: any, scale: any, ...rest: any[]): any {
+    if (!feel._checkRound(n, scale, ...rest)) return null;
     const f = Math.pow(10, Math.trunc(scale));
-    const x = n * f;
+    const x = (n as number) * f;
     return (x >= 0 ? Math.ceil(x - 0.5) : -Math.ceil(-x - 0.5)) / f;
   },
   decimal(n: any, scale: any): any {
