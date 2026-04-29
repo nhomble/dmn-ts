@@ -821,10 +821,21 @@ export const feel: any = {
       return feel.index(list, probe);
     }
     if (probed && typeof probe === 'boolean' && list.every((it: any) => fn(it) === probe)) {
-      // constant predicate — apply uniformly
       return probe ? list.slice() : [];
     }
-    return list.filter((it: any) => fn(it) === true);
+    // Filter mode: a non-boolean predicate result poisons the filter to null.
+    const out: any[] = [];
+    for (const it of list) {
+      let r: any;
+      try {
+        r = fn(it);
+      } catch {
+        return null;
+      }
+      if (typeof r !== 'boolean') return null;
+      if (r) out.push(it);
+    }
+    return out;
   },
   count(list: any): any {
     return Array.isArray(list) ? list.length : null;
@@ -1463,17 +1474,31 @@ export const feel: any = {
     // also skipped between adjacent surviving elements.
     return list.filter((x: any) => x !== null).join(s);
   },
+  // DMN 1.4+ floor/ceiling accept an optional scale argument (digits after
+  // the decimal). The scale is truncated and bounded by the BigDecimal range.
   floor(...args: any[]): any {
-    if (args.length !== 1) return null;
+    if (args.length < 1 || args.length > 2) return null;
     const n = args[0];
     if (typeof n !== 'number' || !Number.isFinite(n)) return null;
-    return Math.floor(n);
+    if (args.length === 1) return Math.floor(n);
+    const scale = args[1];
+    if (typeof scale !== 'number' || !Number.isFinite(scale)) return null;
+    const s = Math.trunc(scale);
+    if (s < -6111 || s > 6176) return null;
+    const f = Math.pow(10, s);
+    return Math.floor(n * f) / f;
   },
   ceiling(...args: any[]): any {
-    if (args.length !== 1) return null;
+    if (args.length < 1 || args.length > 2) return null;
     const n = args[0];
     if (typeof n !== 'number' || !Number.isFinite(n)) return null;
-    return Math.ceil(n);
+    if (args.length === 1) return Math.ceil(n);
+    const scale = args[1];
+    if (typeof scale !== 'number' || !Number.isFinite(scale)) return null;
+    const s = Math.trunc(scale);
+    if (s < -6111 || s > 6176) return null;
+    const f = Math.pow(10, s);
+    return Math.ceil(n * f) / f;
   },
   abs(...args: any[]): any {
     if (args.length !== 1) return null;

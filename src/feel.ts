@@ -1163,13 +1163,15 @@ function emitIdent(name: string, ctx?: CompileContext): string {
   // a module-scope BKM/service of the same name).
   const remapped = ctx?.localBindings?.[name];
   if (remapped) return remapped;
-  // Inside a filter predicate, an unqualified name should prefer a property
-  // of the iterated item over a same-named builtin (e.g. `number` is both
-  // a builtin function and a common context field).
+  // Inside a filter predicate: prefer a property of the iterated item over
+  // any same-named outer binding (so `[{a:1}][a > 0]` reads each item's `a`
+  // and `[{item:1}][item > 0]` reads each item's `item` rather than the
+  // whole iteration variable). Fall back to the JS-scope variable only
+  // when the item has no such property.
   if (ctx?.inFilterScope) {
+    const key = JSON.stringify(name);
     const ident = toJsIdent(name);
-    // `typeof <bareIdent>` doesn't throw for an undeclared name — safe probe.
-    return `(typeof ${ident} !== 'undefined' ? ${ident} : feel.prop(item, ${JSON.stringify(name)}))`;
+    return `((item != null && typeof item === 'object' && ${key} in (item as any)) ? feel.prop(item, ${key}) : (typeof ${ident} !== 'undefined' ? ${ident} : null))`;
   }
   if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
   return toJsIdent(name);
