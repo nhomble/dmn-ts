@@ -263,6 +263,21 @@ function emitDecisionTableBody(
     lines.push(`    const __in${idx}: any = ${e};`);
   });
   lines.push(`    const __matches: any[] = [];`);
+  // Wrap a compiled cell with `feel.validate(cell, typeRef)` when the
+  // cell or its column declares a type. Both forms can apply — the cell
+  // type, when present, takes precedence over the column type.
+  const wrapCell = (oi: number, raw: string, cellTypeRef?: string): string => {
+    const t = cellTypeRef ?? table.outputs[oi]?.typeRef;
+    if (
+      !t ||
+      !(isScalarTypeRef(t) || cctx.validatableTypes?.has(typeRefLocal(t)))
+    ) {
+      return raw;
+    }
+    const isCol = cctx.collectionTypes?.has(typeRefLocal(t));
+    const inner = isCol ? raw : `feel.singleton(${raw})`;
+    return `feel.validate(${inner}, ${JSON.stringify(t)}, __itemDefs)`;
+  };
   table.rules.forEach((rule, ri) => {
     const tests = rule.inputEntries.map((entry, idx) =>
       translateUnaryTest(entry, `__in${idx}`, allNames),
@@ -271,12 +286,16 @@ function emitDecisionTableBody(
     let outExpr: string;
     if (outputIsObject) {
       const parts = table.outputs.map((o, oi) => {
-        const v = feelExpr(rule.outputEntries[oi] ?? '', allNames, cctx);
-        return `${JSON.stringify(o.name ?? `output${oi}`)}: ${v}`;
+        const cell = rule.outputEntries[oi];
+        const v = feelExpr(cell?.text ?? '', allNames, cctx);
+        const validated = wrapCell(oi, v, cell?.typeRef);
+        return `${JSON.stringify(o.name ?? `output${oi}`)}: ${validated}`;
       });
       outExpr = `{ ${parts.join(', ')} }`;
     } else {
-      outExpr = feelExpr(rule.outputEntries[0] ?? '', allNames, cctx);
+      const cell = rule.outputEntries[0];
+      const v = feelExpr(cell?.text ?? '', allNames, cctx);
+      outExpr = wrapCell(0, v, cell?.typeRef);
     }
     lines.push(`    // rule ${ri + 1}`);
     lines.push(`    if (${cond}) { __matches.push(${outExpr}); }`);
@@ -320,10 +339,29 @@ function emitDecisionTableFn(
   cctx: CompileContext,
 ): string {
   const prelude = emitDecisionPrelude(decision, cctx);
+  // Wrap the decision-table body in an IIFE so we can validate its
+  // return value against the decision's declared typeRef.
+  const t = decision.typeRef;
+  const validates =
+    t &&
+    (isScalarTypeRef(t) || cctx.validatableTypes?.has(typeRefLocal(t)));
+  if (!validates) {
+    return [
+      `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+      ...prelude,
+      ...emitDecisionTableBody(table, allNames, cctx),
+      `  },`,
+    ].join('\n');
+  }
+  const isCol = cctx.collectionTypes?.has(typeRefLocal(t!));
+  const inner = isCol ? '__r' : 'feel.singleton(__r)';
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...prelude,
+    `    const __r: any = (() => {`,
     ...emitDecisionTableBody(table, allNames, cctx),
+    `    })();`,
+    `    return feel.validate(${inner}, ${JSON.stringify(t)}, __itemDefs);`,
     `  },`,
   ].join('\n');
 }
@@ -381,12 +419,15 @@ function emitInvocationCall(
 
 // Generic per-entry body compiler. Returns the JS expression for whatever
 // form the entry takes (literal, function-def, decision-table, invocation,
-// nested context).
+// nested context). When the entry's `<variable typeRef="...">` constrains
+// the value, we wrap the result with `feel.validate` so a non-conforming
+// computed value lands as null in the resulting context.
 function emitContextEntryBody(
   e: DmnContextEntry,
   allNames: string[],
   cctx: CompileContext,
 ): string {
+  let body: string;
   if (e.functionParameters) {
     const fnLocalNames = [
       ...allNames,
@@ -403,16 +444,16 @@ function emitContextEntryBody(
     return `Object.assign(((${params}): any => (${fnBody})), { __params: ${paramNames} as readonly string[] })`;
   }
   if (e.decisionTable) {
-    const body = emitDecisionTableBody(e.decisionTable, allNames, cctx);
-    return `(() => {\n${body.join('\n')}\n  })()`;
+    const tableBody = emitDecisionTableBody(e.decisionTable, allNames, cctx);
+    body = `(() => {\n${tableBody.join('\n')}\n  })()`;
+  } else if (e.invocation) {
+    body = emitInvocationCall(e.invocation, allNames, cctx);
+  } else if (e.context) {
+    body = emitContextValue(e.context, allNames, cctx);
+  } else {
+    body = e.bodyText ? feelExpr(e.bodyText, allNames, cctx) : 'undefined';
   }
-  if (e.invocation) {
-    return emitInvocationCall(e.invocation, allNames, cctx);
-  }
-  if (e.context) {
-    return emitContextValue(e.context, allNames, cctx);
-  }
-  return e.bodyText ? feelExpr(e.bodyText, allNames, cctx) : 'undefined';
+  return maybeValidate(body, e.typeRef, cctx);
 }
 
 // Produce a JS expression that evaluates a context to either an object (when
@@ -603,6 +644,26 @@ function emitInvocationFn(
   ].join('\n');
 }
 
+// Wrap a compiled value with `feel.validate` when the supplied typeRef
+// is something we can check against (a scalar or a known item type).
+// Used by relation cells, list elements, context entries — places where
+// the typeRef is an explicit annotation, not the decision's variable.
+function maybeValidate(
+  expr: string,
+  typeRef: string | undefined,
+  cctx: CompileContext,
+): string {
+  if (
+    !typeRef ||
+    !(isScalarTypeRef(typeRef) || cctx.validatableTypes?.has(typeRefLocal(typeRef)))
+  ) {
+    return expr;
+  }
+  const isCol = cctx.collectionTypes?.has(typeRefLocal(typeRef));
+  const inner = isCol ? expr : `feel.singleton(${expr})`;
+  return `feel.validate(${inner}, ${JSON.stringify(typeRef)}, __itemDefs)`;
+}
+
 function emitRelationFn(
   decision: DmnDecision,
   rel: DmnRelation,
@@ -613,15 +674,16 @@ function emitRelationFn(
   const items = rel.rows.map((row) => {
     const props = rel.columns.map((col, i) => {
       const cell = row.cells[i];
-      const v = cell ? feelExpr(cell, allNames, cctx) : 'null';
-      return `${JSON.stringify(col)}: ${v}`;
+      const v = cell ? feelExpr(cell.text, allNames, cctx) : 'null';
+      // A cell typeRef overrides its column's typeRef.
+      const cellType = cell?.typeRef ?? col.typeRef;
+      const validated = maybeValidate(v, cellType, cctx);
+      return `${JSON.stringify(col.name)}: ${validated}`;
     });
     return `{ ${props.join(', ')} }`;
   });
   let retExpr = `[${items.join(', ')}]`;
-  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
-    retExpr = `feel.validate(${retExpr}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
-  }
+  retExpr = maybeValidate(retExpr, decision.typeRef, cctx);
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...prelude,
@@ -632,16 +694,17 @@ function emitRelationFn(
 
 function emitListFn(
   decision: DmnDecision,
-  items: string[],
+  items: { text: string; typeRef?: string }[],
   allNames: string[],
   cctx: CompileContext,
 ): string {
   const prelude = emitDecisionPrelude(decision, cctx);
-  const elements = items.map((t) => (t ? feelExpr(t, allNames, cctx) : 'null'));
+  const elements = items.map((it) => {
+    const v = it.text ? feelExpr(it.text, allNames, cctx) : 'null';
+    return maybeValidate(v, it.typeRef, cctx);
+  });
   let expr = `[${elements.join(', ')}]`;
-  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
-    expr = `feel.validate(${expr}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
-  }
+  expr = maybeValidate(expr, decision.typeRef, cctx);
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...prelude,
@@ -708,6 +771,19 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
   for (const n of ds.inputDecisions) {
     const d = model.decisions.find((x) => x.name === n);
     if (d?.typeRef) inputTypes.set(n, d.typeRef);
+  }
+  // When the service's variable typeRef is a functionItem, its parameter
+  // declarations override whatever types the underlying input/decision
+  // happen to carry — the function signature wins at the boundary.
+  if (ds.typeRef) {
+    const fnItem = model.itemDefinitions.find(
+      (it) => it.name === typeRefLocal(ds.typeRef!) && it.isFunction,
+    );
+    if (fnItem?.functionParameters) {
+      for (const p of fnItem.functionParameters) {
+        if (p.typeRef) inputTypes.set(p.name, p.typeRef);
+      }
+    }
   }
   const inputCoercions = inputNames
     .filter((n) => {

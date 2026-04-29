@@ -615,6 +615,14 @@ export const feel: any = {
             if (item === null) continue;
             if (feel.validate(item, def.base, itemDefs) === null) return null;
           }
+        } else if (def.components && def.components.length) {
+          // A collection with components attached describes a list of
+          // contexts sharing that component shape — validate each row.
+          for (const item of v) {
+            if (item === null) continue;
+            if (feel._validateComponents(item, def.components, itemDefs) === null)
+              return null;
+          }
         }
         return v;
       }
@@ -641,36 +649,45 @@ export const feel: any = {
         });
         if (!ok) return null;
       }
-      // Validate structural components: every named component must be
-      // present and (when typed) conform to its declared type. Extra
-      // fields beyond those declared are allowed (FEEL is open-world).
+      // Validate structural components against the declared shape.
       if (def.components && def.components.length) {
-        if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
-        for (const c of def.components) {
-          const fieldVal = (v as Record<string, unknown>)[c.name];
-          if (fieldVal === undefined) return null;
-          if (fieldVal === null) continue;
-          // A component declared `isCollection` requires a list, with each
-          // element validated against the declared element typeRef.
-          if (c.isCollection) {
-            if (!Array.isArray(fieldVal)) return null;
-            if (c.typeRef) {
-              for (const elem of fieldVal as unknown[]) {
-                if (elem === null) continue;
-                if (feel.validate(elem, c.typeRef, itemDefs, { noSingleton: true }) === null) return null;
-              }
-            }
-            continue;
-          }
-          if (c.typeRef) {
-            const validated = feel.validate(fieldVal, c.typeRef, itemDefs, { noSingleton: true });
-            if (validated === null) return null;
-          }
+        if (feel._validateComponents(v, def.components, itemDefs) === null) {
+          return null;
         }
       }
       return v;
     }
     return feel.coerce(v, typeRef);
+  },
+  // Validate `v` against an array of component descriptors (the structural
+  // shape of an item definition). Every named component must be present
+  // (extra fields are allowed — FEEL is open-world), and when a component
+  // declares a typeRef the value is recursively validated against it.
+  // `isCollection` components require a list of values that each conform
+  // to the declared element typeRef. Returns the value or null.
+  _validateComponents(v: any, components: any[], itemDefs: any): any {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+    for (const c of components) {
+      const fieldVal = (v as Record<string, unknown>)[c.name];
+      if (fieldVal === undefined) return null;
+      if (fieldVal === null) continue;
+      if (c.isCollection) {
+        if (!Array.isArray(fieldVal)) return null;
+        if (c.typeRef) {
+          for (const elem of fieldVal as unknown[]) {
+            if (elem === null) continue;
+            if (feel.validate(elem, c.typeRef, itemDefs, { noSingleton: true }) === null)
+              return null;
+          }
+        }
+        continue;
+      }
+      if (c.typeRef) {
+        const validated = feel.validate(fieldVal, c.typeRef, itemDefs, { noSingleton: true });
+        if (validated === null) return null;
+      }
+    }
+    return v;
   },
   // Like `validate` but skips allowedValueTests at every level — used to
   // check structural compatibility against a base type when the derived

@@ -186,9 +186,15 @@ function conditionalBoxedToFeelText(node: any): string {
 }
 
 function parseRelationXml(rel: any): DmnRelation {
-  const columns = arr<any>(rel.column).map((c) => c['@_name'] ?? '');
+  const columns = arr<any>(rel.column).map((c) => ({
+    name: c['@_name'] ?? '',
+    typeRef: c['@_typeRef'],
+  }));
   const rows: DmnRelationRow[] = arr<any>(rel.row).map((r) => ({
-    cells: arr<any>(r.literalExpression).map((le) => String(le?.text ?? '')),
+    cells: arr<any>(r.literalExpression).map((le) => ({
+      text: String(le?.text ?? ''),
+      typeRef: le?.['@_typeRef'],
+    })),
   }));
   return { columns, rows };
 }
@@ -258,7 +264,10 @@ function parseDecisionTableXml(dt: any): DmnDecisionTable {
   });
   const rules: DmnDecisionTableRule[] = arr<any>(dt.rule).map((r) => ({
     inputEntries: arr<any>(r.inputEntry).map((e) => String(e?.text ?? '')),
-    outputEntries: arr<any>(r.outputEntry).map((e) => String(e?.text ?? '')),
+    outputEntries: arr<any>(r.outputEntry).map((e) => ({
+      text: String(e?.text ?? ''),
+      typeRef: e?.['@_typeRef'],
+    })),
   }));
   return {
     hitPolicy: dt['@_hitPolicy'] ?? 'UNIQUE',
@@ -396,8 +405,11 @@ export function parseDmn(xml: string): DmnModel {
     const relation: DmnRelation | undefined = n.relation
       ? parseRelationXml(n.relation)
       : undefined;
-    const listItems: string[] | undefined = n.list?.literalExpression
-      ? arr<any>(n.list.literalExpression).map((le) => String(le?.text ?? ''))
+    const listItems = n.list?.literalExpression
+      ? arr<any>(n.list.literalExpression).map((le) => ({
+          text: String(le?.text ?? ''),
+          typeRef: le?.['@_typeRef'],
+        }))
       : undefined;
     return {
       id: n['@_id'],
@@ -450,6 +462,12 @@ export function parseDmn(xml: string): DmnModel {
       })),
       isFunction: !!fi,
       functionOutputTypeRef: fi?.['@_outputTypeRef'],
+      functionParameters: fi
+        ? arr<any>(fi.parameters).map((p) => ({
+            name: p['@_name'] ?? '',
+            typeRef: p['@_typeRef'],
+          }))
+        : undefined,
     };
   });
 

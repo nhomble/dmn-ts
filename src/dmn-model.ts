@@ -23,7 +23,10 @@ export interface DmnDecisionTableOutput {
 
 export interface DmnDecisionTableRule {
   inputEntries: string[];
-  outputEntries: string[];
+  // Each output cell carries its FEEL text plus an optional cell-level
+  // typeRef. The `<outputEntry typeRef="...">` form constrains the cell
+  // value to the named type — non-conforming text resolves to null.
+  outputEntries: { text: string; typeRef?: string }[];
 }
 
 export interface DmnDecisionTable {
@@ -45,9 +48,10 @@ export interface DmnDecision {
   context?: DmnContext;
   invocation?: DmnInvocation;
   relation?: DmnRelation;
-  // Boxed `<dmn:list>` body — list of literal expressions whose values form
-  // the list elements at runtime.
-  listItems?: string[];
+  // Boxed `<dmn:list>` body — list of literal expressions whose values
+  // form the list elements at runtime. Each item carries optional
+  // cell-level typeRef.
+  listItems?: { text: string; typeRef?: string }[];
 }
 
 export interface DmnBkmParameter {
@@ -84,13 +88,20 @@ export interface DmnInvocation {
 }
 
 export interface DmnRelationRow {
-  // One literal-expression text per column, in column order. Empty rows
-  // (or missing cells) become null in the emitted output.
-  cells: string[];
+  // One cell per column, in column order. Each cell carries its FEEL text
+  // plus an optional cell-level typeRef. Missing cells become null.
+  cells: { text: string; typeRef?: string }[];
+}
+
+export interface DmnRelationColumn {
+  name: string;
+  // Optional `<column typeRef="...">` — applies to every cell in the
+  // column unless the cell itself overrides with its own typeRef.
+  typeRef?: string;
 }
 
 export interface DmnRelation {
-  columns: string[];
+  columns: DmnRelationColumn[];
   rows: DmnRelationRow[];
 }
 
@@ -122,6 +133,10 @@ export interface DmnItemDefinition {
   // a typeRef is rejected (returns null).
   isFunction?: boolean;
   functionOutputTypeRef?: string;
+  // `<parameters name="..." typeRef="...">` on a functionItem declares the
+  // parameter shape. Used at decision-service entry to validate each input
+  // against its declared type when the service's typeRef is a functionItem.
+  functionParameters?: { name: string; typeRef?: string }[];
 }
 
 export interface DmnDecisionService {
