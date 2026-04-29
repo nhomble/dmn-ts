@@ -1182,7 +1182,6 @@ function emitIdent(name: string, ctx?: CompileContext): string {
 // Map alternative names to the canonical name in FEEL_BUILTIN_PARAMS.
 const FEEL_PARAM_ALIASES: Record<string, Record<string, string>> = {
   'list replace': { match: 'position' },
-  'context put': { keys: 'key' },
 };
 
 function lookupSignature(

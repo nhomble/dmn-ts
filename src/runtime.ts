@@ -947,10 +947,14 @@ export const feel: any = {
   list_contains(list: any, item: any): any {
     if (list && typeof list === 'object' && list.__feel === 'range') {
       const { lo, hi, openLow, openHigh } = list;
-      // Per FEEL, ranges with null endpoints are not navigable — `in` against
-      // them is undefined (null). Same when the probed item is null.
       if (lo === null || hi === null) return null;
       if (item == null) return null;
+      // A degenerate `=X` range (point range, both endpoints same and
+      // closed) collapses to equality — handles types like booleans and
+      // lists where `<` / `<=` are undefined.
+      if (!openLow && !openHigh && feel.eq(lo, hi) === true) {
+        return feel.eq(lo, item) === true;
+      }
       const lower = openLow ? feel.lt(lo, item) : feel.le(lo, item);
       const upper = openHigh ? feel.lt(item, hi) : feel.le(item, hi);
       if (lower == null || upper == null) return null;
@@ -1151,7 +1155,6 @@ export const feel: any = {
   context_put(context: any, key: any, value: any, ...rest: any[]): any {
     if (rest.length > 0) return null;
     if (context == null || typeof context !== 'object' || Array.isArray(context)) return null;
-    // Two-arg form (context, key) is invalid — value is required.
     if (value === undefined) return null;
     if (typeof key === 'string') {
       return { ...(context as object), [key]: value };
@@ -1159,16 +1162,26 @@ export const feel: any = {
     if (Array.isArray(key)) {
       if (key.length === 0) return null;
       if (!key.every((k) => typeof k === 'string')) return null;
-      // Recursive insert at the keypath, copying intermediate contexts.
       const [head, ...tail] = key;
       if (tail.length === 0) {
         return { ...(context as object), [head]: value };
       }
+      // Intermediate path segments must already point at a context (or be
+      // missing entirely — we then create the chain). Pointing at a scalar
+      // or list is a structural error.
       const inner = (context as Record<string, unknown>)[head];
-      const innerCtx =
-        inner !== null && typeof inner === 'object' && !Array.isArray(inner)
-          ? inner
-          : {};
+      let innerCtx: Record<string, unknown>;
+      if (inner === undefined) {
+        innerCtx = {};
+      } else if (
+        inner !== null &&
+        typeof inner === 'object' &&
+        !Array.isArray(inner)
+      ) {
+        innerCtx = inner as Record<string, unknown>;
+      } else {
+        return null;
+      }
       const updated = feel.context_put(innerCtx, tail, value);
       if (updated === null) return null;
       return { ...(context as object), [head]: updated };
