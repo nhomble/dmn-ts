@@ -450,9 +450,47 @@ export const feel: any = {
     if (typeof a !== 'number' || typeof b !== 'number') return null;
     return a >= b;
   },
-  // Coerce a value to a declared FEEL primitive type, or null if the value
-  // doesn't match. For unknown / user-defined types, returns the value as-is
-  // (we don't have the item-definition info to validate).
+  // Validate a value against either a FEEL primitive type or a user-defined
+  // item definition. Returns the value if it conforms, else null.
+  validate(v: any, typeRef: any, itemDefs: any): any {
+    if (v === null || v === undefined) return null;
+    if (typeof typeRef !== 'string') return v;
+    const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+    // User-defined item definition?
+    const def = itemDefs && itemDefs[local];
+    if (def) {
+      if (def.isCollection) {
+        if (!Array.isArray(v)) return null;
+        if (def.base) {
+          for (const item of v) {
+            if (feel.validate(item, def.base, itemDefs) === null && item !== null) {
+              return null;
+            }
+          }
+        }
+        return v;
+      }
+      // Validate against base type — may be primitive (coerce) or another
+      // user-defined type (recurse so its allowedValues constrain ours too).
+      if (def.base) {
+        const validated = feel.validate(v, def.base, itemDefs);
+        if (validated === null) return null;
+      }
+      // Then check allowedValueTests — each is a compiled FEEL unary test.
+      if (def.allowedValueTests) {
+        const ok = def.allowedValueTests.some((t: any) => {
+          try {
+            return t(v) === true;
+          } catch {
+            return false;
+          }
+        });
+        if (!ok) return null;
+      }
+      return v;
+    }
+    return feel.coerce(v, typeRef);
+  },
   coerce(v: any, typeRef: string): any {
     if (v === null || v === undefined) return null;
     const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
@@ -1215,10 +1253,30 @@ export const feel: any = {
     }
     return null;
   },
-  string(v: any): any {
-    if (v == null) return null;
-    if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') return String(v);
-    return null;
+  string(v: any, ...rest: any[]): any {
+    // FEEL `string` takes exactly one argument; extra args → null.
+    if (rest.length > 0) return null;
+    if (v === null || v === undefined) return null;
+    // Top-level string is returned verbatim (no quoting); nested strings
+    // inside a list/context get quoted by `_formatFeelValue`.
+    if (typeof v === 'string') return v;
+    return feel._formatFeelValue(v);
+  },
+  // Render a FEEL value as a string in FEEL syntax: lists with `[...]`,
+  // contexts with `{key: value}`, strings quoted with internal quotes
+  // backslash-escaped, primitives as-is.
+  _formatFeelValue(v: any): string {
+    if (v === null) return 'null';
+    if (typeof v === 'string') return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (Array.isArray(v)) return `[${v.map((x) => feel._formatFeelValue(x)).join(', ')}]`;
+    if (typeof v === 'object') {
+      const entries = Object.entries(v).map(
+        ([k, val]) => `${k}: ${feel._formatFeelValue(val)}`,
+      );
+      return `{${entries.join(', ')}}`;
+    }
+    return String(v);
   },
   is_defined(v: any): any {
     return v !== undefined;

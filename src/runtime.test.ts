@@ -37,7 +37,8 @@ test('not: only defined on booleans', () => {
 test('add: numbers, string concat, null propagation', () => {
   assert.equal(feel.add(2, 3), 5);
   assert.equal(feel.add('a', 'b'), 'ab');
-  assert.equal(feel.add('a', 1), 'a1');
+  // FEEL is strict: cross-type addition (string + number) → null.
+  assert.equal(feel.add('a', 1), null);
   assert.equal(feel.add(1, null), null);
 });
 

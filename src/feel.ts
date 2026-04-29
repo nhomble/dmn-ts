@@ -255,6 +255,30 @@ const FEEL_PARAM_NAMES: string[] = Array.from(
   new Set(Object.values(FEEL_BUILTIN_PARAMS).flat()),
 );
 
+// Match a known FEEL identifier (possibly multi-word like `date and time`) at
+// position `i`, allowing arbitrary whitespace between words. Returns the
+// number of input characters consumed, or null if no match.
+function matchMultiWord(
+  input: string,
+  name: string,
+  i: number,
+): number | null {
+  if (!name.includes(' ')) {
+    return input.startsWith(name, i) ? name.length : null;
+  }
+  const parts = name.split(' ');
+  let cur = i;
+  for (let k = 0; k < parts.length; k++) {
+    if (k > 0) {
+      while (cur < input.length && /\s/.test(input[cur])) cur++;
+      if (cur >= input.length) return null;
+    }
+    if (!input.startsWith(parts[k], cur)) return null;
+    cur += parts[k].length;
+  }
+  return cur - i;
+}
+
 function isWordChar(c: string): boolean {
   return /[A-Za-z0-9_]/.test(c);
 }
@@ -331,7 +355,13 @@ function tokenize(input: string, knownNames: string[]): Token[] {
           else if (esc === 'r') raw += '\r';
           else if (esc === '"') raw += '"';
           else if (esc === '\\') raw += '\\';
-          else raw += esc;
+          else if (esc === "'") raw += "'";
+          else if (esc === '/') raw += '/';
+          else if (esc === 'b') raw += '\b';
+          else if (esc === 'f') raw += '\f';
+          // Unknown escape — preserve verbatim so regex metachars like
+          // `\s`, `\d`, `\w` survive into runtime regex compilation.
+          else raw += '\\' + esc;
           j += 2;
         } else {
           raw += input[j];
@@ -379,20 +409,23 @@ function tokenize(input: string, knownNames: string[]): Token[] {
     // Identifier — try longest known multi-word name first, else single-word.
     if (/[A-Za-z_]/.test(c)) {
       let matchedName: string | null = null;
+      let matchedLen = 0;
       for (const name of sortedNames) {
-        if (input.startsWith(name, i)) {
+        const consumed = matchMultiWord(input, name, i);
+        if (consumed != null) {
           const before = i === 0 ? ' ' : input[i - 1];
           const after =
-            i + name.length >= input.length ? ' ' : input[i + name.length];
+            i + consumed >= input.length ? ' ' : input[i + consumed];
           if (!isWordChar(before) && !isWordChar(after)) {
             matchedName = name;
+            matchedLen = consumed;
             break;
           }
         }
       }
       if (matchedName) {
         tokens.push({ kind: 'ident', name: matchedName });
-        i += matchedName.length;
+        i += matchedLen;
         continue;
       }
       const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(input.slice(i));
@@ -983,15 +1016,92 @@ const BINOP_TO_RUNTIME: Record<string, string> = {
 };
 
 export interface CompileContext {
-  // FEEL function name → ordered parameter names (for named-arg → positional mapping)
   signatures: Record<string, string[]>;
+  validatableTypes?: Set<string>;
+  // User-defined type names whose itemDefinition is `isCollection: true`. We
+  // skip the FEEL singleton-unwrap on decisions returning these (otherwise
+  // `[["a","b"]]` gets flattened to `["a","b"]` before list validation).
+  collectionTypes?: Set<string>;
+  // Set when compiling the predicate body of a list-filter `expr[predicate]`.
+  // Free identifier references then fall back to property access on the
+  // current `item`, per FEEL filter scope rules.
+  inFilterScope?: boolean;
 }
 
 const DEFAULT_CTX: CompileContext = { signatures: {} };
 
-function emitIdent(name: string): string {
+// Walks the AST checking for any `ident` node with the given name. Used to
+// detect `partial` references in for-loop bodies.
+function referencesName(node: FeelNode, name: string): boolean {
+  switch (node.type) {
+    case 'ident':
+      return node.name === name;
+    case 'unary':
+      return referencesName(node.arg, name);
+    case 'binop':
+      return referencesName(node.left, name) || referencesName(node.right, name);
+    case 'paren':
+      return referencesName(node.expr, name);
+    case 'call':
+      return (
+        referencesName(node.fn, name) ||
+        node.args.some((a) => referencesName(a, name)) ||
+        (node.namedArgs ?? []).some((na) => referencesName(na.value, name))
+      );
+    case 'member':
+      return referencesName(node.obj, name);
+    case 'if':
+      return (
+        referencesName(node.cond, name) ||
+        referencesName(node.thenE, name) ||
+        referencesName(node.elseE, name)
+      );
+    case 'list':
+      return node.items.some((i) => referencesName(i, name));
+    case 'context':
+      return node.entries.some((e) => referencesName(e.value, name));
+    case 'index':
+      return (
+        referencesName(node.list, name) || referencesName(node.index, name)
+      );
+    case 'for':
+    case 'quant':
+      return (
+        node.bindings.some((b) => referencesName(b.range, name)) ||
+        referencesName(node.body, name)
+      );
+    case 'between':
+      return (
+        referencesName(node.value, name) ||
+        referencesName(node.lo, name) ||
+        referencesName(node.hi, name)
+      );
+    case 'in':
+      return referencesName(node.value, name) || referencesName(node.list, name);
+    case 'instanceof':
+      return referencesName(node.value, name);
+    case 'lambda':
+      return referencesName(node.body, name);
+    case 'range':
+      return referencesName(node.lo, name) || referencesName(node.hi, name);
+    case 'unaryTests':
+      return node.tests.some((t) =>
+        t.kind === 'cmp' ? referencesName(t.rhs, name) : referencesName(t.expr, name),
+      );
+    default:
+      return false;
+  }
+}
+
+function emitIdent(name: string, ctx?: CompileContext): string {
   if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
-  return toJsIdent(name);
+  const ident = toJsIdent(name);
+  if (ctx?.inFilterScope) {
+    // `typeof <bareIdent>` is the only reference form that does NOT throw on
+    // an undeclared name, so it's safe to use here as a scope probe.
+    return `(typeof ${ident} !== 'undefined' ? ${ident} : feel.prop(item, ${JSON.stringify(name)}))`;
+  }
+  return ident;
 }
 
 function lookupSignature(
@@ -1016,7 +1126,7 @@ export function emitFeelNode(
     case 'null':
       return 'null';
     case 'ident':
-      return emitIdent(node.name);
+      return emitIdent(node.name, ctx);
     case 'paren':
       return `(${emitFeelNode(node.expr, ctx)})`;
     case 'unary':
@@ -1065,9 +1175,19 @@ export function emitFeelNode(
         .join(', ');
       return `{ ${props} }`;
     }
-    case 'index':
-      return `feel.indexOrFilter(${emitFeelNode(node.list, ctx)}, (item: any) => ${emitFeelNode(node.index, ctx)})`;
+    case 'index': {
+      const filterCtx: CompileContext = { ...ctx, inFilterScope: true };
+      return `feel.indexOrFilter(${emitFeelNode(node.list, ctx)}, (item: any) => ${emitFeelNode(node.index, filterCtx)})`;
+    }
     case 'for': {
+      // FEEL's `for` exposes a magic name `partial` to the iteration body —
+      // the list of results computed so far. When the body references it,
+      // emit a manual loop that maintains that accumulator.
+      if (node.bindings.length === 1 && referencesName(node.body, 'partial')) {
+        const b = node.bindings[0];
+        const inner = emitFeelNode(node.body, ctx);
+        return `(() => { const partial: any[] = []; for (const ${toJsIdent(b.name)} of feel.iterate(${emitFeelNode(b.range, ctx)})) { partial.push(${inner}); } return partial; })()`;
+      }
       let inner = emitFeelNode(node.body, ctx);
       for (let i = node.bindings.length - 1; i >= 0; i--) {
         const b = node.bindings[i];

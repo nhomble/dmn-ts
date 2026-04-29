@@ -110,6 +110,14 @@ export interface DmnContext {
   entries: DmnContextEntry[];
 }
 
+export interface DmnItemDefinition {
+  name: string;
+  typeRef?: string;
+  isCollection: boolean;
+  allowedValues?: string[];
+  components?: { name: string; typeRef?: string }[];
+}
+
 export interface DmnDecisionService {
   id?: string;
   name: string;
@@ -124,6 +132,7 @@ export interface DmnModel {
   decisions: DmnDecision[];
   bkms: DmnBkm[];
   decisionServices: DmnDecisionService[];
+  itemDefinitions: DmnItemDefinition[];
 }
 
 const xmlParser = new XMLParser({
@@ -147,6 +156,8 @@ const xmlParser = new XMLParser({
       'decisionService',
       'outputDecision',
       'inputDecision',
+      'itemDefinition',
+      'itemComponent',
     ].includes(name),
 });
 
@@ -267,12 +278,32 @@ export function parseDmn(xml: string): DmnModel {
       .filter((s) => s),
   }));
 
+  const itemDefinitionRaw = arr<any>(defs.itemDefinition);
+  const itemDefinitions: DmnItemDefinition[] = itemDefinitionRaw.map((n) => {
+    const ovText: string | undefined = n.allowedValues?.text;
+    return {
+      name: n['@_name'] ?? '',
+      typeRef: n.typeRef ?? n.typeRef?.['#text'],
+      isCollection: n['@_isCollection'] === 'true',
+      // Keep entries as raw FEEL unary-test text so the emitter can compile
+      // ranges, comparisons, and quoted literals uniformly.
+      allowedValues: ovText
+        ? splitTopLevelCommas(String(ovText)).map((s) => s.trim())
+        : undefined,
+      components: arr<any>(n.itemComponent).map((c) => ({
+        name: c['@_name'] ?? '',
+        typeRef: c.typeRef ?? c.typeRef?.['#text'],
+      })),
+    };
+  });
+
   return {
     name: defs['@_name'] ?? 'model',
     inputData,
     decisions,
     bkms,
     decisionServices,
+    itemDefinitions,
   };
 }
 
@@ -415,7 +446,32 @@ function buildCompileContext(model: DmnModel): CompileContext {
   for (const b of model.bkms) {
     signatures[b.name] = b.parameters.map((p) => p.name);
   }
-  return { signatures };
+  const validatableTypes = new Set(model.itemDefinitions.map((it) => it.name));
+  const collectionTypes = new Set(
+    model.itemDefinitions.filter((it) => it.isCollection).map((it) => it.name),
+  );
+  return { signatures, validatableTypes, collectionTypes };
+}
+
+// Build a JS-source literal describing the model's user-defined types
+// (item definitions). The generated runtime helper consumes this to validate
+// decision returns against allowedValues / base types.
+function emitItemDefsLiteral(model: DmnModel): string {
+  const props = model.itemDefinitions.map((it) => {
+    const fields: string[] = [];
+    if (it.typeRef) fields.push(`base: ${JSON.stringify(it.typeRef)}`);
+    if (it.isCollection) fields.push(`isCollection: true`);
+    if (it.allowedValues) {
+      // Compile each FEEL unary-test fragment into a predicate that runs
+      // against the candidate value at validation time.
+      const tests = it.allowedValues.map(
+        (av) => `(__v: any) => ${translateUnaryTest(av, '__v', [])}`,
+      );
+      fields.push(`allowedValueTests: [${tests.join(', ')}]`);
+    }
+    return `${JSON.stringify(it.name)}: { ${fields.join(', ')} }`;
+  });
+  return `{ ${props.join(', ')} }`;
 }
 
 const SCALAR_FEEL_TYPES = new Set([
@@ -432,10 +488,21 @@ const SCALAR_FEEL_TYPES = new Set([
   'any',
 ]);
 
+function typeRefLocal(typeRef: string): string {
+  return typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+}
+
 function isScalarTypeRef(typeRef?: string): boolean {
   if (!typeRef) return false;
   const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
   return SCALAR_FEEL_TYPES.has(local);
+}
+
+function shouldValidateTypeRef(typeRef: string | undefined, model: DmnModel): boolean {
+  if (!typeRef) return false;
+  if (isScalarTypeRef(typeRef)) return true;
+  const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+  return model.itemDefinitions.some((it) => it.name === local);
 }
 
 // Parses an outputValues text body like `"Approved","Declined"` into the
@@ -654,9 +721,24 @@ function emitInvocationCall(
   cctx: CompileContext,
 ): string {
   if (!inv.fnText) return 'null';
-  const fnName = inv.fnText.trim();
+  const fnText = inv.fnText.trim();
   const compiledArgValue = (b: DmnInvocationBinding) =>
     feelExpr(b.bodyText ?? 'null', allNames, cctx);
+  // Inline function definition: compile as a FEEL expression and call it.
+  if (/^function\s*\(/.test(fnText)) {
+    const fnExpr = compileFeel(fnText, allNames, cctx);
+    const m = /^function\s*\(([^)]*)\)/.exec(fnText);
+    const params = (m?.[1] ?? '')
+      .split(',')
+      .map((s) => s.trim().split(':')[0].trim())
+      .filter((s) => s.length > 0);
+    const positional = params.map((p) => {
+      const b = inv.bindings.find((x) => x.name === p);
+      return b ? compiledArgValue(b) : 'undefined';
+    });
+    return `(${fnExpr})(${positional.join(', ')})`;
+  }
+  const fnName = fnText;
   const sig = cctx.signatures[fnName] ?? FEEL_BUILTIN_PARAMS[fnName];
   const fnExpr = FEEL_BUILTINS[fnName]
     ? `feel.${FEEL_BUILTINS[fnName]}`
@@ -868,8 +950,10 @@ function emitInvocationFn(
     return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
   });
   let expr = emitInvocationCall(inv, allNames, cctx);
-  if (isScalarTypeRef(decision.typeRef)) {
-    expr = `feel.coerce(feel.singleton(${expr}), ${JSON.stringify(decision.typeRef)})`;
+  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
+    const isCollection = cctx.collectionTypes?.has(typeRefLocal(decision.typeRef));
+    const inner = isCollection ? expr : `feel.singleton(${expr})`;
+    expr = `feel.validate(${inner}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
@@ -939,8 +1023,10 @@ function emitDecisionFn(
   let expr = decision.literalExpressionText
     ? feelExpr(decision.literalExpressionText, allNames, cctx)
     : '/* TODO: non-literal expression not yet supported */ undefined';
-  if (isScalarTypeRef(decision.typeRef)) {
-    expr = `feel.coerce(feel.singleton(${expr}), ${JSON.stringify(decision.typeRef)})`;
+  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
+    const isCollection = cctx.collectionTypes?.has(typeRefLocal(decision.typeRef));
+    const inner = isCollection ? expr : `feel.singleton(${expr})`;
+    expr = `feel.validate(${inner}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
@@ -952,9 +1038,10 @@ function emitDecisionFn(
 }
 
 function emitDecisionService(ds: DmnDecisionService): string {
-  // Each input becomes a positional parameter (name preserved as-is for the
-  // ctx assignment). Returns the value of the (single) output decision, or
-  // an object keyed by name if there are multiple outputs.
+  // Each input becomes a positional parameter. The service always returns a
+  // context keyed by output-decision name — the test harness extracts the
+  // requested field, and FEEL invocation sites (`svc()`) get the whole
+  // context which can be drilled into via `.fieldName`.
   const inputNames = [...ds.inputDecisions, ...ds.inputData];
   const params = inputNames
     .map((n) => `${toJsIdent(n)}: any`)
@@ -962,19 +1049,23 @@ function emitDecisionService(ds: DmnDecisionService): string {
   const ctxParts = inputNames
     .map((n) => `${JSON.stringify(n)}: ${toJsIdent(n)}`)
     .join(', ');
-  let body: string;
-  if (ds.outputDecisions.length === 1) {
-    const out = ds.outputDecisions[0];
-    body = `return decisions[${JSON.stringify(out)}]({ ${ctxParts} });`;
-  } else {
-    const calls = ds.outputDecisions
-      .map(
-        (o) =>
-          `${JSON.stringify(o)}: decisions[${JSON.stringify(o)}](__svcCtx)`,
-      )
-      .join(', ');
-    body = `const __svcCtx: any = { ${ctxParts} };\n  return { ${calls} };`;
-  }
+  const calls = ds.outputDecisions
+    .map(
+      (o) =>
+        `${JSON.stringify(o)}: decisions[${JSON.stringify(o)}](__svcCtx)`,
+    )
+    .join(', ');
+  const nullOutputs = ds.outputDecisions
+    .map((o) => `${JSON.stringify(o)}: null`)
+    .join(', ');
+  const arity = inputNames.length;
+  // Arity mismatch → all outputs null. DMN signals the missing/extra
+  // bindings as an error; we mirror that as a null context.
+  const body = [
+    `if (arguments.length !== ${arity}) return { ${nullOutputs} };`,
+    `const __svcCtx: any = { ${ctxParts} };`,
+    `return { ${calls} };`,
+  ].join('\n  ');
   return `function ${toJsIdent(ds.name)}(${params}): any {\n  ${body}\n}`;
 }
 
@@ -1037,6 +1128,8 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     `// source DMN model: ${model.name}`,
     ``,
     `import { feel } from ${JSON.stringify(runtimeImport)};`,
+    ``,
+    `const __itemDefs: any = ${emitItemDefsLiteral(model)};`,
     ``,
     ...bkmDefs,
     bkmDefs.length ? '' : null,

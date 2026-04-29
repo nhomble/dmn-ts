@@ -77,6 +77,26 @@ function parseTestNodeBody(node: any): unknown {
   return parseValueNode(node);
 }
 
+function normalizeIsoDuration(s: string): string | null {
+  // Parses `[-]P[nY][nM][nDT[nH][nM][nS]]` and returns a canonical form
+  // where missing parts are zeroed for stable comparison. Returns null
+  // for inputs that don't look like an ISO 8601 duration.
+  const m = /^(-?)P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(s);
+  if (!m) return null;
+  const [, sign, y, mo, d, h, mi, sec] = m;
+  // Reject empty `P` (no parts at all).
+  if (!y && !mo && !d && !h && !mi && !sec) return null;
+  const yn = Number(y ?? 0);
+  const mn = Number(mo ?? 0);
+  const dn = Number(d ?? 0);
+  const hn = Number(h ?? 0);
+  const min = Number(mi ?? 0);
+  const sn = Number(sec ?? 0);
+  // Both `P1Y` and `P1Y0M` denote the same year-month value; canonicalize
+  // by always including both year and month components when either is set.
+  return `${sign}|${yn}|${mn}|${dn}|${hn}|${min}|${sn}`;
+}
+
 export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (typeof a === 'number' && typeof b === 'number') {
@@ -85,6 +105,11 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     if (diff < 1e-9) return true;
     const scale = Math.max(Math.abs(a), Math.abs(b));
     return scale > 0 && diff / scale < 1e-9;
+  }
+  if (typeof a === 'string' && typeof b === 'string') {
+    const an = normalizeIsoDuration(a);
+    const bn = normalizeIsoDuration(b);
+    if (an !== null && bn !== null) return an === bn;
   }
   if (a && b && typeof a === 'object' && typeof b === 'object') {
     const ak = Object.keys(a as object);
@@ -183,6 +208,16 @@ export function runTestCases(
               continue;
             }
             actual = svc(...inputs);
+            // Services return a context keyed by output decision name; the
+            // resultNode names a specific output, so extract it for compare.
+            if (
+              actual &&
+              typeof actual === 'object' &&
+              !Array.isArray(actual) &&
+              Object.prototype.hasOwnProperty.call(actual, name)
+            ) {
+              actual = (actual as Record<string, unknown>)[name];
+            }
           } else {
             const fn = decisions[name];
             if (!fn) {
