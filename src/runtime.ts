@@ -136,7 +136,6 @@ export const feel: any = {
       return null;
     }
     if (feel.is_date_or_dt(a) && feel.is_duration(b)) {
-      // Negate the duration and add.
       const negated = b.startsWith('-') ? b.slice(1) : '-' + b;
       return feel.add_date_duration(a, negated);
     }
@@ -144,18 +143,20 @@ export const feel: any = {
       return feel.diff_dates(a, b);
     }
     if (typeof a !== 'number' || typeof b !== 'number') return null;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     return a - b;
   },
   mul(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (feel.is_duration(a) && typeof b === 'number') return feel.scale_duration(a, b);
-    if (feel.is_duration(b) && typeof a === 'number') return feel.scale_duration(b, a);
+    if (feel.is_duration(a) && typeof b === 'number' && Number.isFinite(b)) return feel.scale_duration(a, b);
+    if (feel.is_duration(b) && typeof a === 'number' && Number.isFinite(a)) return feel.scale_duration(b, a);
     if (typeof a !== 'number' || typeof b !== 'number') return null;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     return a * b;
   },
   div(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (feel.is_duration(a) && typeof b === 'number') {
+    if (feel.is_duration(a) && typeof b === 'number' && Number.isFinite(b)) {
       if (b === 0) return null;
       return feel.scale_duration(a, 1 / b);
     }
@@ -167,6 +168,7 @@ export const feel: any = {
       return null;
     }
     if (typeof a !== 'number' || typeof b !== 'number') return null;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     if (b === 0) return null;
     return a / b;
   },
