@@ -39,7 +39,15 @@ export type FeelNode =
   | { type: 'between'; value: FeelNode; lo: FeelNode; hi: FeelNode }
   | { type: 'in'; value: FeelNode; list: FeelNode }
   | { type: 'instanceof'; value: FeelNode; typeName: string }
-  | { type: 'temporal'; value: string };
+  | { type: 'temporal'; value: string }
+  | { type: 'lambda'; params: string[]; body: FeelNode }
+  | {
+      type: 'range';
+      lo: FeelNode;
+      hi: FeelNode;
+      openLow: boolean;
+      openHigh: boolean;
+    };
 
 type Token =
   | { kind: 'num'; value: number }
@@ -69,6 +77,7 @@ const KEYWORDS = new Set([
   'between',
   'instance',
   'of',
+  'function',
 ]);
 const MULTI_OPS = ['<=', '>=', '!=', '**'];
 const SINGLE_OPS = ['<', '>', '=', '+', '-', '*', '/'];
@@ -129,6 +138,16 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   median: ['list'],
   stddev: ['list'],
   mode: ['list'],
+  sort: ['list', 'precedes'],
+  'get value': ['m', 'key'],
+  'get entries': ['m'],
+  'context put': ['context', 'key', 'value'],
+  'context merge': ['contexts'],
+  'day of year': ['date'],
+  'day of week': ['date'],
+  'month of year': ['date'],
+  'week of year': ['date'],
+  'list replace': ['list', 'position', 'newItem'],
 };
 
 // Builtin FEEL function names (multi-word ones must be in the names list so the
@@ -188,6 +207,16 @@ export const FEEL_BUILTINS: Record<string, string> = {
   median: 'median',
   stddev: 'stddev',
   mode: 'mode',
+  sort: 'sort',
+  'get value': 'get_value',
+  'get entries': 'get_entries',
+  'context put': 'context_put',
+  'context merge': 'context_merge',
+  'day of year': 'day_of_year',
+  'day of week': 'day_of_week',
+  'month of year': 'month_of_year',
+  'week of year': 'week_of_year',
+  'list replace': 'list_replace',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
@@ -282,6 +311,13 @@ function tokenize(input: string, knownNames: string[]): Token[] {
       }
       tokens.push({ kind: 'str', value: raw });
       i = j + 1;
+      continue;
+    }
+
+    // Range operator `..` — must come before single `.` punctuation.
+    if (c === '.' && input[i + 1] === '.') {
+      tokens.push({ kind: 'op', op: '..' });
+      i += 2;
       continue;
     }
 
@@ -400,6 +436,26 @@ class Parser {
     return this.parseOr();
   }
 
+  private parseLambdaParam(): string {
+    const t = this.next();
+    if (t.kind !== 'ident')
+      throw new Error('feel parse: expected parameter name');
+    if (this.isPunct(':')) {
+      this.next();
+      // Skip type annotation (ident, possibly multi-word, possibly `.member` chain).
+      while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
+        this.next();
+      }
+      while (this.isPunct('.')) {
+        this.next();
+        if (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
+          this.next();
+        }
+      }
+    }
+    return t.name;
+  }
+
   private parseInBinding(): { name: string; range: FeelNode } {
     const t = this.next();
     if (t.kind !== 'ident')
@@ -473,9 +529,24 @@ class Parser {
       this.next();
       if (!this.isKw('of')) throw new Error('feel parse: expected of');
       this.next();
-      const t = this.next();
-      const name = t.kind === 'ident' ? t.name : t.kind === 'kw' ? t.name : '';
-      return { type: 'instanceof', value: left, typeName: name };
+      // Type name may be multi-word (e.g. `date and time`).
+      const first = this.next();
+      const parts: string[] = [
+        first.kind === 'ident'
+          ? first.name
+          : first.kind === 'kw'
+            ? first.name
+            : '',
+      ];
+      while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
+        const t = this.next();
+        parts.push(t.kind === 'ident' ? t.name : t.kind === 'kw' ? t.name : '');
+      }
+      return {
+        type: 'instanceof',
+        value: left,
+        typeName: parts.filter((p) => p).join(' '),
+      };
     }
     const compOps = ['<=', '>=', '!=', '<', '>', '='];
     const t = this.peek();
@@ -490,6 +561,11 @@ class Parser {
     while (this.isOp('+') || this.isOp('-')) {
       const op = (this.next() as { kind: 'op'; op: string }).op;
       left = { type: 'binop', op, left, right: this.parseMul() };
+    }
+    if (this.isOp('..')) {
+      this.next();
+      const hi = this.parseAdd();
+      return { type: 'range', lo: left, hi, openLow: false, openHigh: false };
     }
     return left;
   }
@@ -620,6 +696,29 @@ class Parser {
         this.next();
         return { type: 'null' };
       }
+      if (t.name === 'function') {
+        this.next();
+        if (!this.isPunct('('))
+          throw new Error('feel parse: expected ( after function');
+        this.next();
+        const params: string[] = [];
+        if (!this.isPunct(')')) {
+          params.push(this.parseLambdaParam());
+          while (this.isPunct(',')) {
+            this.next();
+            params.push(this.parseLambdaParam());
+          }
+        }
+        if (!this.isPunct(')')) throw new Error('feel parse: expected )');
+        this.next();
+        // Optional FEEL function return-type annotation: `: typeName` (ignored).
+        if (this.isPunct(':')) {
+          this.next();
+          this.parsePrimary();
+        }
+        const body = this.parseExpression();
+        return { type: 'lambda', params, body };
+      }
     }
     if (t.kind === 'ident') {
       this.next();
@@ -628,19 +727,51 @@ class Parser {
     if (t.kind === 'punct' && t.ch === '(') {
       this.next();
       const inner = this.parseExpression();
+      // Bracketed range: `(2..4)` or `(2..4]`. Outer `(` means openLow=true.
+      if (
+        inner.type === 'range' &&
+        (this.isPunct(')') || this.isPunct(']'))
+      ) {
+        const closer = (this.peek() as { kind: 'punct'; ch: string }).ch;
+        this.next();
+        return {
+          type: 'range',
+          lo: inner.lo,
+          hi: inner.hi,
+          openLow: true,
+          openHigh: closer === ')',
+        };
+      }
       if (!this.isPunct(')')) throw new Error('feel parse: expected )');
       this.next();
       return { type: 'paren', expr: inner };
     }
     if (t.kind === 'punct' && t.ch === '[') {
       this.next();
-      const items: FeelNode[] = [];
-      if (!this.isPunct(']')) {
+      if (this.isPunct(']')) {
+        this.next();
+        return { type: 'list', items: [] };
+      }
+      const first = this.parseExpression();
+      // Bracketed range: `[2..4]` or `[2..4)`. Outer `[` means openLow=false.
+      if (
+        first.type === 'range' &&
+        (this.isPunct(')') || this.isPunct(']'))
+      ) {
+        const closer = (this.peek() as { kind: 'punct'; ch: string }).ch;
+        this.next();
+        return {
+          type: 'range',
+          lo: first.lo,
+          hi: first.hi,
+          openLow: false,
+          openHigh: closer === ')',
+        };
+      }
+      const items: FeelNode[] = [first];
+      while (this.isPunct(',')) {
+        this.next();
         items.push(this.parseExpression());
-        while (this.isPunct(',')) {
-          this.next();
-          items.push(this.parseExpression());
-        }
       }
       if (!this.isPunct(']')) throw new Error('feel parse: expected ]');
       this.next();
@@ -765,7 +896,7 @@ export function emitFeelNode(
       return `${emitFeelNode(node.fn, ctx)}(${positional.join(', ')})`;
     }
     case 'member':
-      return `${emitFeelNode(node.obj, ctx)}?.[${JSON.stringify(node.name)}]`;
+      return `feel.prop(${emitFeelNode(node.obj, ctx)}, ${JSON.stringify(node.name)})`;
     case 'if':
       return `((${emitFeelNode(node.cond, ctx)}) ? (${emitFeelNode(node.thenE, ctx)}) : (${emitFeelNode(node.elseE, ctx)}))`;
     case 'list':
@@ -806,6 +937,13 @@ export function emitFeelNode(
       if (/^-?\d+-\d{2}-\d{2}$/.test(v)) return `feel.date(${lit})`;
       if (/^\d{2}:\d{2}/.test(v)) return `feel.time(${lit})`;
       return 'null';
+    }
+    case 'lambda': {
+      const params = node.params.map((p) => `${toJsIdent(p)}: any`).join(', ');
+      return `((${params}): any => ${emitFeelNode(node.body, ctx)})`;
+    }
+    case 'range': {
+      return `feel.range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;
     }
   }
 }
@@ -912,6 +1050,28 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   singleton(v: any): any {
     if (Array.isArray(v) && v.length === 1) return v[0];
     return v;
+  },
+  // FEEL range. When lo/hi are integers, expand into a numeric array suitable
+  // for iteration; otherwise return a tagged bounds object that list_contains
+  // and other helpers know how to test.
+  range(lo: any, hi: any, openLow = false, openHigh = false): any {
+    if (lo == null || hi == null) return null;
+    if (
+      typeof lo === 'number' &&
+      typeof hi === 'number' &&
+      Number.isInteger(lo) &&
+      Number.isInteger(hi) &&
+      Math.abs(hi - lo) <= 1_000_000
+    ) {
+      const out: number[] = [];
+      const step = lo <= hi ? 1 : -1;
+      let cur = openLow ? lo + step : lo;
+      const end = openHigh ? hi - step : hi;
+      if (step > 0) for (let i = cur; i <= end; i++) out.push(i);
+      else for (let i = cur; i >= end; i--) out.push(i);
+      return out;
+    }
+    return { __feel: 'range', lo, hi, openLow, openHigh };
   },
   index(list: any, idx: any): any {
     if (!Array.isArray(list)) return null;
@@ -1023,6 +1183,12 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return Array.isArray(list) ? [...list].reverse() : null;
   },
   list_contains(list: any, item: any): any {
+    if (list && typeof list === 'object' && list.__feel === 'range') {
+      const { lo, hi, openLow, openHigh } = list;
+      const lower = openLow ? feel.lt(lo, item) : feel.le(lo, item);
+      const upper = openHigh ? feel.lt(item, hi) : feel.le(item, hi);
+      return lower === true && upper === true;
+    }
     if (!Array.isArray(list)) return null;
     for (const x of list) if (feel.eq(x, item) === true) return true;
     return false;
@@ -1085,6 +1251,16 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (!Number.isFinite(i) || i < 1 || i > list.length) return null;
     return [...list.slice(0, i - 1), ...list.slice(i)];
   },
+  list_replace(list: any, position: any, newItem: any): any {
+    if (!Array.isArray(list) || position == null) return null;
+    let i = Number(position);
+    if (!Number.isFinite(i)) return null;
+    if (i < 0) i = list.length + i + 1;
+    if (i < 1 || i > list.length) return null;
+    const out = [...list];
+    out[i - 1] = newItem;
+    return out;
+  },
   median(list: any): any {
     if (!Array.isArray(list) || list.length === 0) return null;
     const nums = list.map(Number).sort((a, b) => a - b);
@@ -1110,6 +1286,132 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     const modes: any[] = [];
     for (const [k, v] of counts) if (v === max) modes.push(k);
     return modes.sort();
+  },
+  sort(list: any, precedes: any): any {
+    if (!Array.isArray(list)) return null;
+    if (typeof precedes !== 'function') return [...list].sort();
+    return [...list].sort((a: any, b: any) => (precedes(a, b) === true ? -1 : 1));
+  },
+  get_value(m: any, key: any): any {
+    if (m == null || typeof m !== 'object' || Array.isArray(m)) return null;
+    if (typeof key !== 'string') return null;
+    return key in m ? (m as Record<string, unknown>)[key] : null;
+  },
+  get_entries(m: any): any {
+    if (m == null || typeof m !== 'object' || Array.isArray(m)) return null;
+    return Object.entries(m).map(([key, value]) => ({ key, value }));
+  },
+  context_put(context: any, key: any, value: any): any {
+    if (context == null || typeof context !== 'object' || Array.isArray(context)) return null;
+    if (typeof key !== 'string') return null;
+    return { ...(context as object), [key]: value };
+  },
+  context_merge(contexts: any): any {
+    if (!Array.isArray(contexts)) return null;
+    const out: Record<string, unknown> = {};
+    for (const c of contexts) {
+      if (c == null || typeof c !== 'object' || Array.isArray(c)) return null;
+      Object.assign(out, c);
+    }
+    return out;
+  },
+  day_of_year(d: any): any {
+    if (typeof d !== 'string') return null;
+    const m = /^(-?)(\\d+)-(\\d{2})-(\\d{2})/.exec(d);
+    if (!m) return null;
+    const y = (m[1] === '-' ? -1 : 1) * Number(m[2]);
+    const mo = Number(m[3]);
+    const da = Number(m[4]);
+    const dt = new Date(Date.UTC(Math.abs(y), mo - 1, da));
+    const start = new Date(Date.UTC(Math.abs(y), 0, 1));
+    return Math.floor((dt.getTime() - start.getTime()) / 86_400_000) + 1;
+  },
+  day_of_week(d: any): any {
+    if (typeof d !== 'string') return null;
+    const m = /^(-?)(\\d+)-(\\d{2})-(\\d{2})/.exec(d);
+    if (!m) return null;
+    const dt = new Date(Date.UTC(
+      (m[1] === '-' ? -1 : 1) * Number(m[2]),
+      Number(m[3]) - 1,
+      Number(m[4]),
+    ));
+    const names = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    return names[dt.getUTCDay()];
+  },
+  month_of_year(d: any): any {
+    if (typeof d !== 'string') return null;
+    const m = /^-?\\d+-(\\d{2})-\\d{2}/.exec(d);
+    if (!m) return null;
+    const names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return names[Number(m[1]) - 1] ?? null;
+  },
+  // Property access — handles object fields and the implicit fields exposed
+  // by date/time/dateTime/duration string values (year, month, day, hour, …).
+  prop(obj: any, key: string): any {
+    if (obj == null) return null;
+    if (typeof obj === 'string') return feel.temporal_prop(obj, key);
+    if (typeof obj === 'object') {
+      return key in obj ? (obj as Record<string, unknown>)[key] : null;
+    }
+    return null;
+  },
+  temporal_prop(s: string, key: string): any {
+    const dtMatch = /^(-?)(\\d+)-(\\d{2})-(\\d{2})(?:T(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?(.*))?$/.exec(s);
+    if (dtMatch) {
+      const sign = dtMatch[1] === '-' ? -1 : 1;
+      const y = sign * Number(dtMatch[2]);
+      const mo = Number(dtMatch[3]);
+      const d = Number(dtMatch[4]);
+      if (key === 'year') return y;
+      if (key === 'month') return mo;
+      if (key === 'day') return d;
+      if (key === 'weekday') {
+        const dt = new Date(Date.UTC(Math.abs(y), mo - 1, d));
+        return ((dt.getUTCDay() + 6) % 7) + 1;
+      }
+      if (dtMatch[5] !== undefined) {
+        if (key === 'hour') return Number(dtMatch[5]);
+        if (key === 'minute') return Number(dtMatch[6]);
+        if (key === 'second') return Number(dtMatch[7]);
+        if (key === 'time offset' || key === 'timezone') return dtMatch[9] || null;
+      } else {
+        if (key === 'hour' || key === 'minute' || key === 'second') return 0;
+        if (key === 'time offset' || key === 'timezone') return null;
+      }
+      return null;
+    }
+    const tMatch = /^(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?(.*)$/.exec(s);
+    if (tMatch) {
+      if (key === 'hour') return Number(tMatch[1]);
+      if (key === 'minute') return Number(tMatch[2]);
+      if (key === 'second') return Number(tMatch[3]);
+      if (key === 'time offset' || key === 'timezone') return tMatch[5] || null;
+      return null;
+    }
+    const durMatch = /^(-?)P(?:(\\d+)Y)?(?:(\\d+)M)?(?:(\\d+)D)?(?:T(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)(?:\\.\\d+)?S)?)?$/.exec(s);
+    if (durMatch) {
+      const sign = durMatch[1] === '-' ? -1 : 1;
+      if (key === 'years') return sign * Number(durMatch[2] || 0);
+      if (key === 'months') return sign * Number(durMatch[3] || 0);
+      if (key === 'days') return sign * Number(durMatch[4] || 0);
+      if (key === 'hours') return sign * Number(durMatch[5] || 0);
+      if (key === 'minutes') return sign * Number(durMatch[6] || 0);
+      if (key === 'seconds') return sign * Number(durMatch[7] || 0);
+      return null;
+    }
+    return null;
+  },
+  week_of_year(d: any): any {
+    if (typeof d !== 'string') return null;
+    const m = /^(-?)(\\d+)-(\\d{2})-(\\d{2})/.exec(d);
+    if (!m) return null;
+    const y = (m[1] === '-' ? -1 : 1) * Number(m[2]);
+    const dt = new Date(Date.UTC(Math.abs(y), Number(m[3]) - 1, Number(m[4])));
+    // ISO 8601 week number.
+    const target = new Date(dt.getTime());
+    target.setUTCDate(target.getUTCDate() + 3 - ((target.getUTCDay() + 6) % 7));
+    const week1 = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+    return 1 + Math.round(((target.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7);
   },
   string_length(s: any): any {
     return typeof s === 'string' ? s.length : null;
