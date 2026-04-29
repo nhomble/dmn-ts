@@ -1,7 +1,11 @@
 import { XMLParser } from 'fast-xml-parser';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compileFeel, FEEL_RUNTIME_SOURCE } from './feel.js';
+import {
+  compileFeel,
+  FEEL_RUNTIME_SOURCE,
+  type CompileContext,
+} from './feel.js';
 import { toJsIdent } from './ident.js';
 
 export { toJsIdent };
@@ -239,8 +243,40 @@ function splitTopLevelCommas(s: string): string[] {
   return out;
 }
 
-function feelExpr(text: string, allNames: string[]): string {
-  return compileFeel(text, allNames);
+function feelExpr(
+  text: string,
+  allNames: string[],
+  ctx?: CompileContext,
+): string {
+  return compileFeel(text, allNames, ctx);
+}
+
+function buildCompileContext(model: DmnModel): CompileContext {
+  const signatures: Record<string, string[]> = {};
+  for (const b of model.bkms) {
+    signatures[b.name] = b.parameters.map((p) => p.name);
+  }
+  return { signatures };
+}
+
+const SCALAR_FEEL_TYPES = new Set([
+  'string',
+  'number',
+  'boolean',
+  'date',
+  'time',
+  'dateTime',
+  'date and time',
+  'duration',
+  'years and months duration',
+  'days and time duration',
+  'any',
+]);
+
+function isScalarTypeRef(typeRef?: string): boolean {
+  if (!typeRef) return false;
+  const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+  return SCALAR_FEEL_TYPES.has(local);
 }
 
 // Parses an outputValues text body like `"Approved","Declined"` into the
@@ -366,6 +402,7 @@ function emitDecisionTableFn(
   decision: DmnDecision,
   table: DmnDecisionTable,
   allNames: string[],
+  cctx: CompileContext,
 ): string {
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
@@ -376,7 +413,9 @@ function emitDecisionTableFn(
     return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
   });
 
-  const inputExprsJs = table.inputs.map((i) => feelExpr(i.text, allNames));
+  const inputExprsJs = table.inputs.map((i) =>
+    feelExpr(i.text, allNames, cctx),
+  );
 
   const outputIsObject =
     table.outputs.length > 1 ||
@@ -399,12 +438,12 @@ function emitDecisionTableFn(
     let outExpr: string;
     if (outputIsObject) {
       const parts = table.outputs.map((o, oi) => {
-        const v = feelExpr(rule.outputEntries[oi] ?? '', allNames);
+        const v = feelExpr(rule.outputEntries[oi] ?? '', allNames, cctx);
         return `${JSON.stringify(o.name ?? `output${oi}`)}: ${v}`;
       });
       outExpr = `{ ${parts.join(', ')} }`;
     } else {
-      outExpr = feelExpr(rule.outputEntries[0] ?? '', allNames);
+      outExpr = feelExpr(rule.outputEntries[0] ?? '', allNames, cctx);
     }
     lines.push(`    // rule ${ri + 1}`);
     lines.push(`    if (${cond}) { __matches.push(${outExpr}); }`);
@@ -422,9 +461,13 @@ function emitDecisionTableFn(
   return lines.join('\n');
 }
 
-function emitDecisionFn(decision: DmnDecision, allNames: string[]): string {
+function emitDecisionFn(
+  decision: DmnDecision,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
   if (decision.decisionTable) {
-    return emitDecisionTableFn(decision, decision.decisionTable, allNames);
+    return emitDecisionTableFn(decision, decision.decisionTable, allNames, cctx);
   }
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
@@ -434,9 +477,12 @@ function emitDecisionFn(decision: DmnDecision, allNames: string[]): string {
     const ident = toJsIdent(n);
     return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
   });
-  const expr = decision.literalExpressionText
-    ? feelExpr(decision.literalExpressionText, allNames)
+  let expr = decision.literalExpressionText
+    ? feelExpr(decision.literalExpressionText, allNames, cctx)
     : '/* TODO: non-literal expression not yet supported */ undefined';
+  if (isScalarTypeRef(decision.typeRef)) {
+    expr = `feel.singleton(${expr})`;
+  }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...inputBindings,
@@ -446,13 +492,17 @@ function emitDecisionFn(decision: DmnDecision, allNames: string[]): string {
   ].join('\n');
 }
 
-function emitBkm(bkm: DmnBkm, allNames: string[]): string {
+function emitBkm(
+  bkm: DmnBkm,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
   const params = bkm.parameters
     .map((p) => `${toJsIdent(p.name)}: any`)
     .join(', ');
   const localNames = [...allNames, ...bkm.parameters.map((p) => p.name)];
   const body = bkm.bodyText
-    ? compileFeel(bkm.bodyText, localNames)
+    ? compileFeel(bkm.bodyText, localNames, cctx)
     : 'undefined';
   return `function ${toJsIdent(bkm.name)}(${params}): any {\n  return ${body};\n}`;
 }
@@ -463,7 +513,8 @@ export function emitTs(model: DmnModel): string {
     ...model.decisions.map((d) => d.name),
     ...model.bkms.map((b) => b.name),
   ];
-  const bkmDefs = model.bkms.map((b) => emitBkm(b, allNames));
+  const cctx = buildCompileContext(model);
+  const bkmDefs = model.bkms.map((b) => emitBkm(b, allNames, cctx));
   return [
     `// @generated by tom-rools — do not edit by hand`,
     `// source DMN model: ${model.name}`,
@@ -478,7 +529,7 @@ export function emitTs(model: DmnModel): string {
     )};`,
     ``,
     `export const decisions: Record<string, DecisionFn> = {`,
-    ...model.decisions.map((d) => emitDecisionFn(d, allNames)),
+    ...model.decisions.map((d) => emitDecisionFn(d, allNames, cctx)),
     `};`,
     ``,
   ]

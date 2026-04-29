@@ -67,6 +67,63 @@ const MULTI_OPS = ['<=', '>=', '!=', '**'];
 const SINGLE_OPS = ['<', '>', '=', '+', '-', '*', '/'];
 const PUNCT = new Set(['(', ')', '[', ']', '{', '}', ',', '.', ':']);
 
+// Parameter order for FEEL builtins, used to map named arguments to positions.
+// Keyed by the FEEL builtin name (the same key as FEEL_BUILTINS).
+export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
+  count: ['list'],
+  sum: ['list'],
+  min: ['list'],
+  max: ['list'],
+  mean: ['list'],
+  all: ['list'],
+  any: ['list'],
+  sublist: ['list', 'start position', 'length'],
+  append: ['list', 'item'],
+  concatenate: ['list'],
+  reverse: ['list'],
+  'list contains': ['list', 'element'],
+  'distinct values': ['list'],
+  flatten: ['list'],
+  product: ['list'],
+  'string length': ['string'],
+  substring: ['string', 'start position', 'length'],
+  'substring before': ['string', 'match'],
+  'substring after': ['string', 'match'],
+  'upper case': ['string'],
+  'lower case': ['string'],
+  contains: ['string', 'match'],
+  'starts with': ['string', 'match'],
+  'ends with': ['string', 'match'],
+  matches: ['input', 'pattern', 'flags'],
+  replace: ['input', 'pattern', 'replacement', 'flags'],
+  split: ['string', 'delimiter'],
+  'string join': ['list', 'delimiter'],
+  floor: ['n'],
+  ceiling: ['n'],
+  abs: ['n'],
+  modulo: ['dividend', 'divisor'],
+  sqrt: ['n'],
+  log: ['n'],
+  exp: ['n'],
+  odd: ['n'],
+  even: ['n'],
+  decimal: ['n', 'scale'],
+  number: ['from'],
+  string: ['from'],
+  date: ['from'],
+  time: ['from'],
+  'date and time': ['from'],
+  duration: ['from'],
+  'years and months duration': ['from', 'to'],
+  'insert before': ['list', 'position', 'newItem'],
+  'index of': ['list', 'match'],
+  union: ['list'],
+  remove: ['list', 'position'],
+  median: ['list'],
+  stddev: ['list'],
+  mode: ['list'],
+};
+
 // Builtin FEEL function names (multi-word ones must be in the names list so the
 // tokenizer matches them as a single identifier). Mapped to the JS-safe name
 // of the corresponding helper in the runtime.
@@ -117,7 +174,21 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'date and time': 'date_and_time',
   duration: 'duration',
   'years and months duration': 'years_and_months_duration',
+  'insert before': 'insert_before',
+  'index of': 'index_of',
+  union: 'union',
+  remove: 'remove',
+  median: 'median',
+  stddev: 'stddev',
+  mode: 'mode',
 };
+
+// All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
+// be recognized by the tokenizer (multi-word names like "start position") so
+// named-argument calls parse correctly.
+const FEEL_PARAM_NAMES: string[] = Array.from(
+  new Set(Object.values(FEEL_BUILTIN_PARAMS).flat()),
+);
 
 function isWordChar(c: string): boolean {
   return /[A-Za-z0-9_]/.test(c);
@@ -125,8 +196,13 @@ function isWordChar(c: string): boolean {
 
 function tokenize(input: string, knownNames: string[]): Token[] {
   // Model names first (same-length ties go to input order with stable sort, so
-  // user-declared names win over builtins of the same length).
-  const allNames = [...knownNames, ...Object.keys(FEEL_BUILTINS)];
+  // user-declared names win over builtins of the same length). Param names
+  // come last; they're only consulted in named-arg call positions.
+  const allNames = [
+    ...knownNames,
+    ...Object.keys(FEEL_BUILTINS),
+    ...FEEL_PARAM_NAMES,
+  ];
   const sortedNames = allNames.sort((a, b) => b.length - a.length);
   const tokens: Token[] = [];
   let i = 0;
@@ -537,12 +613,30 @@ const BINOP_TO_RUNTIME: Record<string, string> = {
   '>=': 'ge',
 };
 
+export interface CompileContext {
+  // FEEL function name → ordered parameter names (for named-arg → positional mapping)
+  signatures: Record<string, string[]>;
+}
+
+const DEFAULT_CTX: CompileContext = { signatures: {} };
+
 function emitIdent(name: string): string {
   if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
   return toJsIdent(name);
 }
 
-export function emitFeelNode(node: FeelNode): string {
+function lookupSignature(
+  fn: FeelNode,
+  ctx: CompileContext,
+): string[] | undefined {
+  if (fn.type !== 'ident') return undefined;
+  return ctx.signatures[fn.name] ?? FEEL_BUILTIN_PARAMS[fn.name];
+}
+
+export function emitFeelNode(
+  node: FeelNode,
+  ctx: CompileContext = DEFAULT_CTX,
+): string {
   switch (node.type) {
     case 'num':
       return JSON.stringify(node.value);
@@ -555,68 +649,80 @@ export function emitFeelNode(node: FeelNode): string {
     case 'ident':
       return emitIdent(node.name);
     case 'paren':
-      return `(${emitFeelNode(node.expr)})`;
+      return `(${emitFeelNode(node.expr, ctx)})`;
     case 'unary':
-      if (node.op === 'not') return `feel.not(${emitFeelNode(node.arg)})`;
-      return `feel.neg(${emitFeelNode(node.arg)})`;
+      if (node.op === 'not') return `feel.not(${emitFeelNode(node.arg, ctx)})`;
+      return `feel.neg(${emitFeelNode(node.arg, ctx)})`;
     case 'binop': {
       const fn = BINOP_TO_RUNTIME[node.op];
       if (!fn) throw new Error(`feel emit: unknown binop ${node.op}`);
-      return `feel.${fn}(${emitFeelNode(node.left)}, ${emitFeelNode(node.right)})`;
+      return `feel.${fn}(${emitFeelNode(node.left, ctx)}, ${emitFeelNode(node.right, ctx)})`;
     }
     case 'call': {
-      const positional = node.args.map(emitFeelNode);
-      // If any named args, build an extra `__named__` object as the last arg —
-      // the runtime helpers accept this form.
+      const positional = node.args.map((a) => emitFeelNode(a, ctx));
       if (node.namedArgs && node.namedArgs.length) {
-        const props = node.namedArgs
-          .map(
-            (na) => `${JSON.stringify(na.name)}: ${emitFeelNode(na.value)}`,
-          )
-          .join(', ');
-        positional.push(`{ __named: { ${props} } }`);
+        const sig = lookupSignature(node.fn, ctx);
+        if (sig) {
+          for (const na of node.namedArgs) {
+            const idx = sig.indexOf(na.name);
+            const v = emitFeelNode(na.value, ctx);
+            if (idx < 0) positional.push(v);
+            else {
+              while (positional.length <= idx) positional.push('undefined');
+              positional[idx] = v;
+            }
+          }
+        } else {
+          const props = node.namedArgs
+            .map(
+              (na) => `${JSON.stringify(na.name)}: ${emitFeelNode(na.value, ctx)}`,
+            )
+            .join(', ');
+          positional.push(`{ __named: { ${props} } }`);
+        }
       }
-      return `${emitFeelNode(node.fn)}(${positional.join(', ')})`;
+      return `${emitFeelNode(node.fn, ctx)}(${positional.join(', ')})`;
     }
     case 'member':
-      return `${emitFeelNode(node.obj)}?.[${JSON.stringify(node.name)}]`;
+      return `${emitFeelNode(node.obj, ctx)}?.[${JSON.stringify(node.name)}]`;
     case 'if':
-      return `((${emitFeelNode(node.cond)}) ? (${emitFeelNode(node.thenE)}) : (${emitFeelNode(node.elseE)}))`;
+      return `((${emitFeelNode(node.cond, ctx)}) ? (${emitFeelNode(node.thenE, ctx)}) : (${emitFeelNode(node.elseE, ctx)}))`;
     case 'list':
-      return `[${node.items.map(emitFeelNode).join(', ')}]`;
+      return `[${node.items.map((i) => emitFeelNode(i, ctx)).join(', ')}]`;
     case 'context': {
       const props = node.entries
-        .map((e) => `${JSON.stringify(e.key)}: ${emitFeelNode(e.value)}`)
+        .map((e) => `${JSON.stringify(e.key)}: ${emitFeelNode(e.value, ctx)}`)
         .join(', ');
       return `{ ${props} }`;
     }
     case 'index':
-      // The inner expression may reference `item` (a filter predicate) or be
-      // a numeric index. The runtime decides at evaluation time.
-      return `feel.indexOrFilter(${emitFeelNode(node.list)}, (item: any) => ${emitFeelNode(node.index)})`;
+      return `feel.indexOrFilter(${emitFeelNode(node.list, ctx)}, (item: any) => ${emitFeelNode(node.index, ctx)})`;
     case 'for': {
-      let inner = emitFeelNode(node.body);
+      let inner = emitFeelNode(node.body, ctx);
       for (let i = node.bindings.length - 1; i >= 0; i--) {
         const b = node.bindings[i];
         const isLast = i === node.bindings.length - 1;
-        inner = `((${emitFeelNode(b.range)}) as any[]).${isLast ? 'map' : 'flatMap'}((${toJsIdent(b.name)}: any) => ${inner})`;
+        inner = `((${emitFeelNode(b.range, ctx)}) as any[]).${isLast ? 'map' : 'flatMap'}((${toJsIdent(b.name)}: any) => ${inner})`;
       }
       return inner;
     }
     case 'quant': {
-      // Only single-binding quantifiers for now; multi-binding cases are rare in cl3.
       const b = node.bindings[0];
       const method = node.kind === 'every' ? 'every' : 'some';
-      return `((${emitFeelNode(b.range)}) as any[]).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body)} === true)`;
+      return `((${emitFeelNode(b.range, ctx)}) as any[]).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body, ctx)} === true)`;
     }
   }
 }
 
-export function compileFeel(text: string, knownNames: string[]): string {
+export function compileFeel(
+  text: string,
+  knownNames: string[],
+  ctx: CompileContext = DEFAULT_CTX,
+): string {
   const tokens = tokenize(text, knownNames);
   const parser = new Parser(tokens);
   const ast = parser.parse();
-  return emitFeelNode(ast);
+  return emitFeelNode(ast, ctx);
 }
 
 // Inlined into every generated module so output stays self-contained.
@@ -705,6 +811,12 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (typeof a === 'string' && typeof b === 'string') return a >= b;
     return Number(a) >= Number(b);
   },
+  // FEEL singleton-list rule: when a list of length 1 is used in a context
+  // expecting a single value, unwrap to the element.
+  singleton(v: any): any {
+    if (Array.isArray(v) && v.length === 1) return v[0];
+    return v;
+  },
   index(list: any, idx: any): any {
     if (!Array.isArray(list)) return null;
     const i = Number(idx);
@@ -767,14 +879,15 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     }
     return best;
   },
-  mean(list: any): any {
-    if (!Array.isArray(list) || list.length === 0) return null;
+  mean(...args: any[]): any {
+    const items = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+    if (items.length === 0) return null;
     let s = 0;
-    for (const x of list) {
+    for (const x of items) {
       if (x == null) return null;
       s += Number(x);
     }
-    return s / list.length;
+    return s / items.length;
   },
   all(list: any): any {
     if (!Array.isArray(list)) return null;
@@ -843,6 +956,64 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       p *= Number(x);
     }
     return p;
+  },
+  insert_before(list: any, position: any, newItem: any): any {
+    if (!Array.isArray(list)) return null;
+    const i = Number(position);
+    if (!Number.isFinite(i) || i < 1 || i > list.length + 1) return null;
+    return [...list.slice(0, i - 1), newItem, ...list.slice(i - 1)];
+  },
+  index_of(list: any, match: any): any {
+    if (!Array.isArray(list)) return null;
+    const out: number[] = [];
+    list.forEach((x: any, i: number) => {
+      if (feel.eq(x, match) === true) out.push(i + 1);
+    });
+    return out;
+  },
+  union(...lists: any[]): any {
+    const items = lists.length === 1 && Array.isArray(lists[0]) ? lists[0] : lists;
+    const out: any[] = [];
+    for (const l of items) {
+      if (!Array.isArray(l)) {
+        if (!out.some((y) => feel.eq(l, y) === true)) out.push(l);
+        continue;
+      }
+      for (const x of l) if (!out.some((y) => feel.eq(x, y) === true)) out.push(x);
+    }
+    return out;
+  },
+  remove(list: any, position: any): any {
+    if (!Array.isArray(list)) return null;
+    const i = Number(position);
+    if (!Number.isFinite(i) || i < 1 || i > list.length) return null;
+    return [...list.slice(0, i - 1), ...list.slice(i)];
+  },
+  median(list: any): any {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const nums = list.map(Number).sort((a, b) => a - b);
+    if (nums.some((n) => !Number.isFinite(n))) return null;
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+  },
+  stddev(list: any): any {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    const nums = list.map(Number);
+    if (nums.some((n) => !Number.isFinite(n))) return null;
+    const m = nums.reduce((s, x) => s + x, 0) / nums.length;
+    const v = nums.reduce((s, x) => s + (x - m) * (x - m), 0) / (nums.length - 1);
+    return Math.sqrt(v);
+  },
+  mode(list: any): any {
+    if (!Array.isArray(list)) return null;
+    if (list.length === 0) return [];
+    const counts = new Map<any, number>();
+    for (const x of list) counts.set(x, (counts.get(x) ?? 0) + 1);
+    let max = 0;
+    for (const v of counts.values()) if (v > max) max = v;
+    const modes: any[] = [];
+    for (const [k, v] of counts) if (v === max) modes.push(k);
+    return modes.sort();
   },
   string_length(s: any): any {
     return typeof s === 'string' ? s.length : null;
@@ -966,39 +1137,70 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return v !== undefined;
   },
   date(...args: any[]): any {
+    const fmt = (y: number, m: number, d: number): string | null => {
+      if (![y, m, d].every(Number.isFinite)) return null;
+      // FEEL allows negative years (BCE); reject year 0 and invalid month/day.
+      if (y === 0 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+      const dt = new Date(Date.UTC(Math.abs(y), m - 1, d));
+      if (
+        Math.abs(y) > 0 && dt.getUTCFullYear() !== Math.abs(y)
+      ) return null;
+      if (dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) return null;
+      const sign = y < 0 ? '-' : '';
+      return \`\${sign}\${String(Math.abs(y)).padStart(4, '0')}-\${String(m).padStart(2, '0')}-\${String(d).padStart(2, '0')}\`;
+    };
     if (args.length === 1) {
       const a = args[0];
-      if (typeof a === 'string') {
-        if (/^\\d{4}-\\d{2}-\\d{2}$/.test(a)) return a;
-        const m = /^(\\d{4}-\\d{2}-\\d{2})/.exec(a);
-        return m ? m[1] : null;
-      }
-      return null;
+      if (typeof a !== 'string') return null;
+      // Allow leading "-" for BCE.
+      const dtMatch = /^(-?\\d{4}-\\d{2}-\\d{2})/.exec(a);
+      const iso = dtMatch ? dtMatch[1] : a;
+      if (!/^-?\\d{4}-\\d{2}-\\d{2}$/.test(iso)) return null;
+      const neg = iso.startsWith('-');
+      const body = neg ? iso.slice(1) : iso;
+      const [y, m, d] = body.split('-').map(Number);
+      return fmt(neg ? -y : y, m, d);
     }
     if (args.length === 3) {
       const [y, m, d] = args.map(Number);
-      if (![y, m, d].every(Number.isFinite)) return null;
-      return \`\${String(y).padStart(4, '0')}-\${String(m).padStart(2, '0')}-\${String(d).padStart(2, '0')}\`;
+      return fmt(y, m, d);
     }
     return null;
   },
   time(...args: any[]): any {
-    if (args.length === 1 && typeof args[0] === 'string') {
-      return /^\\d{2}:\\d{2}:\\d{2}/.test(args[0]) ? args[0] : null;
+    const fmtTime = (h: number, m: number, s: number, frac?: string, tz?: string): string | null => {
+      if (![h, m, s].every(Number.isFinite)) return null;
+      if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s >= 60) return null;
+      const head = \`\${String(h).padStart(2, '0')}:\${String(m).padStart(2, '0')}:\${String(s).padStart(2, '0')}\`;
+      return head + (frac ?? '') + (tz ?? '');
+    };
+    if (args.length === 1) {
+      const a = args[0];
+      if (typeof a !== 'string') return null;
+      const m = /^(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})?$/.exec(a);
+      if (!m) return null;
+      return fmtTime(Number(m[1]), Number(m[2]), Number(m[3]), m[4], m[5]);
     }
     if (args.length >= 3) {
       const [h, m, s] = args.map(Number);
-      if (![h, m, s].every(Number.isFinite)) return null;
-      return \`\${String(h).padStart(2, '0')}:\${String(m).padStart(2, '0')}:\${String(s).padStart(2, '0')}\`;
+      return fmtTime(h, m, s);
     }
     return null;
   },
   date_and_time(...args: any[]): any {
-    if (args.length === 1 && typeof args[0] === 'string') {
-      return args[0];
+    if (args.length === 1) {
+      const a = args[0];
+      if (typeof a !== 'string') return null;
+      const m = /^(-?\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})?)$/.exec(a);
+      if (!m) return null;
+      const d = feel.date(m[1]);
+      const t = feel.time(m[2]);
+      return d && t ? \`\${d}T\${t}\` : null;
     }
     if (args.length === 2) {
-      return \`\${args[0]}T\${args[1]}\`;
+      const d = feel.date(args[0]);
+      const t = feel.time(args[1]);
+      return d && t ? \`\${d}T\${t}\` : null;
     }
     return null;
   },

@@ -32,10 +32,13 @@ function smartCoerce(raw: string): unknown {
 
 function castByXsi(raw: string, xsi: string | undefined): unknown {
   if (xsi === undefined) return smartCoerce(raw);
-  if (xsi === 'xsd:decimal' || xsi === 'xsd:integer' || xsi === 'xsd:double') {
+  // The XML Schema namespace can be bound to either `xsd:` or `xs:` (or another
+  // prefix). Strip whatever prefix is in use and match on the local name.
+  const local = xsi.includes(':') ? (xsi.split(':').pop() as string) : xsi;
+  if (local === 'decimal' || local === 'integer' || local === 'double' || local === 'long' || local === 'float') {
     return Number(raw);
   }
-  if (xsi === 'xsd:boolean') return raw === 'true';
+  if (local === 'boolean') return raw === 'true';
   return raw;
 }
 
