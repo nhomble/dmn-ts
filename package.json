@@ -8,14 +8,26 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test 'dist/**/*.test.js'",
+    "test": "npm run build && node --test dist/runtime.test.js",
     "transpile": "node --enable-source-maps dist/cli.js",
     "harness": "node --enable-source-maps dist/harness.js",
-    "batch": "node --enable-source-maps dist/batch.js",
-    "tck:1.1.cl2": "npm run build && node --enable-source-maps dist/batch.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl2",
-    "tck:1.1.cl3": "npm run build && node --enable-source-maps dist/batch.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl3 -o out/cl3.1.1",
-    "tck:all": "npm run build && node --enable-source-maps dist/batch.js ../oss/jdmn/dmn-test-cases/standard/tck -o out/all"
+    "tck:1.1.cl2": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl2",
+    "tck:1.1.cl3": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl3 -o out/cl3.1.1",
+    "tck:all": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck -o out/all"
   },
+  "files": [
+    "dist/cli.js",
+    "dist/cli.d.ts",
+    "dist/feel.js",
+    "dist/feel.d.ts",
+    "dist/ident.js",
+    "dist/ident.d.ts",
+    "dist/transpile.js",
+    "dist/transpile.d.ts",
+    "dist/runtime.js",
+    "dist/runtime.d.ts",
+    "src/runtime.ts"
+  ],
   "dependencies": {
     "fast-xml-parser": "^4.5.0"
   },
