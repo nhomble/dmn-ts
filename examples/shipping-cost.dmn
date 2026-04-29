@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions
+    xmlns="https://www.omg.org/spec/DMN/20211108/MODEL/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    namespace="https://example.com/dmn/shipping-cost"
+    name="shipping-cost"
+    id="shipping_cost">
+
+    <inputData name="Weight" id="i_Weight">
+        <variable name="Weight" typeRef="number"/>
+    </inputData>
+
+    <inputData name="Destination" id="i_Destination">
+        <variable name="Destination" typeRef="string"/>
+    </inputData>
+
+    <decision name="Shipping Cost" id="d_ShippingCost">
+        <variable name="Shipping Cost" typeRef="number"/>
+        <informationRequirement>
+            <requiredInput href="#i_Weight"/>
+        </informationRequirement>
+        <informationRequirement>
+            <requiredInput href="#i_Destination"/>
+        </informationRequirement>
+        <decisionTable hitPolicy="UNIQUE">
+            <input>
+                <inputExpression typeRef="number"><text>Weight</text></inputExpression>
+            </input>
+            <input>
+                <inputExpression typeRef="string"><text>Destination</text></inputExpression>
+                <inputValues>
+                    <text>"domestic", "international", "express"</text>
+                </inputValues>
+            </input>
+            <output typeRef="number"/>
+
+            <rule>
+                <inputEntry><text>[0..1]</text></inputEntry>
+                <inputEntry><text>"domestic"</text></inputEntry>
+                <outputEntry><text>5</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>(1..5]</text></inputEntry>
+                <inputEntry><text>"domestic"</text></inputEntry>
+                <outputEntry><text>10</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>&gt;5</text></inputEntry>
+                <inputEntry><text>"domestic"</text></inputEntry>
+                <outputEntry><text>20</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>[0..1]</text></inputEntry>
+                <inputEntry><text>"international"</text></inputEntry>
+                <outputEntry><text>15</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>(1..5]</text></inputEntry>
+                <inputEntry><text>"international"</text></inputEntry>
+                <outputEntry><text>30</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>&gt;5</text></inputEntry>
+                <inputEntry><text>"international"</text></inputEntry>
+                <outputEntry><text>60</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>-</text></inputEntry>
+                <inputEntry><text>"express"</text></inputEntry>
+                <outputEntry><text>100</text></outputEntry>
+            </rule>
+        </decisionTable>
+    </decision>
+</definitions>

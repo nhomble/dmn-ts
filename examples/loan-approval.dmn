@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions
+    xmlns="https://www.omg.org/spec/DMN/20211108/MODEL/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    namespace="https://example.com/dmn/loan-approval"
+    name="loan-approval"
+    id="loan_approval">
+
+    <inputData name="Credit Score" id="i_CreditScore">
+        <variable name="Credit Score" typeRef="number"/>
+    </inputData>
+
+    <inputData name="Annual Income" id="i_AnnualIncome">
+        <variable name="Annual Income" typeRef="number"/>
+    </inputData>
+
+    <inputData name="Requested Amount" id="i_RequestedAmount">
+        <variable name="Requested Amount" typeRef="number"/>
+    </inputData>
+
+    <businessKnowledgeModel name="debt to income" id="b_DebtToIncome">
+        <encapsulatedLogic>
+            <formalParameter name="amount" typeRef="number"/>
+            <formalParameter name="income" typeRef="number"/>
+            <literalExpression>
+                <text>if income &gt; 0 then amount / income else null</text>
+            </literalExpression>
+        </encapsulatedLogic>
+        <variable name="debt to income" typeRef="number"/>
+    </businessKnowledgeModel>
+
+    <decision name="DTI Ratio" id="d_DTIRatio">
+        <variable name="DTI Ratio" typeRef="number"/>
+        <informationRequirement>
+            <requiredInput href="#i_RequestedAmount"/>
+        </informationRequirement>
+        <informationRequirement>
+            <requiredInput href="#i_AnnualIncome"/>
+        </informationRequirement>
+        <knowledgeRequirement>
+            <requiredKnowledge href="#b_DebtToIncome"/>
+        </knowledgeRequirement>
+        <literalExpression>
+            <text>debt to income(Requested Amount, Annual Income)</text>
+        </literalExpression>
+    </decision>
+
+    <decision name="Risk Band" id="d_RiskBand">
+        <variable name="Risk Band" typeRef="string"/>
+        <informationRequirement>
+            <requiredInput href="#i_CreditScore"/>
+        </informationRequirement>
+        <decisionTable hitPolicy="FIRST">
+            <input>
+                <inputExpression typeRef="number"><text>Credit Score</text></inputExpression>
+            </input>
+            <output typeRef="string"/>
+            <rule>
+                <inputEntry><text>&gt;=750</text></inputEntry>
+                <outputEntry><text>"low"</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>&gt;=650</text></inputEntry>
+                <outputEntry><text>"medium"</text></outputEntry>
+            </rule>
+            <rule>
+                <inputEntry><text>-</text></inputEntry>
+                <outputEntry><text>"high"</text></outputEntry>
+            </rule>
+        </decisionTable>
+    </decision>
+
+    <decision name="Approval" id="d_Approval">
+        <variable name="Approval" typeRef="string"/>
+        <informationRequirement>
+            <requiredDecision href="#d_RiskBand"/>
+        </informationRequirement>
+        <informationRequirement>
+            <requiredDecision href="#d_DTIRatio"/>
+        </informationRequirement>
+        <literalExpression>
+            <text>if Risk Band = "low" and DTI Ratio &lt; 0.4 then "approved"
+else if Risk Band = "medium" and DTI Ratio &lt; 0.3 then "approved"
+else "rejected"</text>
+        </literalExpression>
+    </decision>
+</definitions>
