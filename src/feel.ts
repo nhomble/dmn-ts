@@ -50,7 +50,15 @@ export type FeelNode =
         | { kind: 'expr'; expr: FeelNode }
       >;
     }
-  | { type: 'lambda'; params: string[]; body: FeelNode }
+  | {
+      type: 'lambda';
+      params: string[];
+      // Optional declared type per parameter (parallel to `params`). Used
+      // to validate arguments at call time — a non-conforming value coerces
+      // to null at the boundary.
+      paramTypes?: (string | undefined)[];
+      body: FeelNode;
+    }
   | {
       type: 'range';
       lo: FeelNode;
@@ -566,24 +574,28 @@ class Parser {
     }
   }
 
-  private parseLambdaParam(): string {
+  private parseLambdaParam(): { name: string; typeRef?: string } {
     const t = this.next();
     if (t.kind !== 'ident')
       throw new Error('feel parse: expected parameter name');
     if (this.isPunct(':')) {
       this.next();
-      // Skip type annotation (ident, possibly multi-word, possibly `.member` chain).
+      // Capture type annotation (ident, possibly multi-word, possibly `.member` chain).
+      const parts: string[] = [];
       while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
-        this.next();
+        const tk = this.next();
+        if (tk.kind === 'ident' || tk.kind === 'kw') parts.push(tk.name);
       }
       while (this.isPunct('.')) {
         this.next();
-        if (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
+        const nt = this.peek();
+        if (nt?.kind === 'ident' || nt?.kind === 'kw') {
           this.next();
         }
       }
+      return { name: t.name, typeRef: parts.join(' ') || undefined };
     }
-    return t.name;
+    return { name: t.name };
   }
 
   private parseInBinding(): { name: string; range: FeelNode } {
@@ -851,12 +863,12 @@ class Parser {
         if (!this.isPunct('('))
           throw new Error('feel parse: expected ( after function');
         this.next();
-        const params: string[] = [];
+        const paramSpecs: { name: string; typeRef?: string }[] = [];
         if (!this.isPunct(')')) {
-          params.push(this.parseLambdaParam());
+          paramSpecs.push(this.parseLambdaParam());
           while (this.isPunct(',')) {
             this.next();
-            params.push(this.parseLambdaParam());
+            paramSpecs.push(this.parseLambdaParam());
           }
         }
         if (!this.isPunct(')')) throw new Error('feel parse: expected )');
@@ -867,7 +879,11 @@ class Parser {
           this.parsePrimary();
         }
         const body = this.parseExpression();
-        return { type: 'lambda', params, body };
+        const params = paramSpecs.map((p) => p.name);
+        const paramTypes = paramSpecs.some((p) => p.typeRef)
+          ? paramSpecs.map((p) => p.typeRef)
+          : undefined;
+        return { type: 'lambda', params, paramTypes, body };
       }
     }
     if (t.kind === 'ident') {
@@ -1378,9 +1394,27 @@ export function emitFeelNode(
     case 'lambda': {
       const params = node.params.map((p) => `${toJsIdent(p)}: any`).join(', ');
       const paramsLit = JSON.stringify(node.params);
-      // Attach the FEEL parameter names so a named-arg call site (which only
-      // sees the function value) can map names → positions at runtime.
-      return `Object.assign(((${params}): any => ${emitFeelNode(node.body, ctx)}), { __params: ${paramsLit} as readonly string[] })`;
+      // Validate any typed parameters at the boundary — a non-conforming
+      // argument coerces to null per FEEL.
+      const validations: string[] = [];
+      if (node.paramTypes) {
+        for (let i = 0; i < node.params.length; i++) {
+          const tr = node.paramTypes[i];
+          if (!tr) continue;
+          const pIdent = toJsIdent(node.params[i]);
+          validations.push(
+            `if (${pIdent} !== null && ${pIdent} !== undefined && (typeof __itemDefs !== 'undefined' ? feel.validate(${pIdent}, ${JSON.stringify(tr)}, __itemDefs) : feel.coerce(${pIdent}, ${JSON.stringify(tr)})) === null) return null;`,
+          );
+        }
+      }
+      const bodyExpr = emitFeelNode(node.body, ctx);
+      const fnBody = validations.length
+        ? `{ ${validations.join(' ')} return ${bodyExpr}; }`
+        : bodyExpr;
+      const arrow = validations.length
+        ? `((${params}): any => ${fnBody})`
+        : `((${params}): any => ${fnBody})`;
+      return `Object.assign(${arrow}, { __params: ${paramsLit} as readonly string[] })`;
     }
     case 'range': {
       return `feel.range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;

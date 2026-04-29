@@ -77,6 +77,9 @@ export interface DmnBkm {
 
 export interface DmnInvocationBinding {
   name: string;
+  // Optional `<parameter typeRef="...">` constrains what flows into the
+  // bound formal parameter; the bound expression is validated against it.
+  typeRef?: string;
   bodyText?: string;
 }
 
@@ -434,6 +437,7 @@ function parseRelationXml(rel: any): DmnRelation {
 function parseInvocationXml(inv: any): DmnInvocation {
   const bindings: DmnInvocationBinding[] = arr<any>(inv.binding).map((b) => ({
     name: b.parameter?.['@_name'] ?? '',
+    typeRef: b.parameter?.['@_typeRef'],
     bodyText: b.literalExpression?.text,
   }));
   return {
@@ -852,8 +856,15 @@ function emitInvocationCall(
 ): string {
   if (!inv.fnText) return 'null';
   const fnText = inv.fnText.trim();
-  const compiledArgValue = (b: DmnInvocationBinding) =>
-    feelExpr(b.bodyText ?? 'null', allNames, cctx);
+  const compiledArgValue = (b: DmnInvocationBinding) => {
+    let expr = feelExpr(b.bodyText ?? 'null', allNames, cctx);
+    if (b.typeRef && (isScalarTypeRef(b.typeRef) || cctx.validatableTypes?.has(typeRefLocal(b.typeRef)))) {
+      // Validate the bound value against the parameter's declared type so
+      // a non-conforming value coerces to null at the call boundary.
+      expr = `feel.validate(${expr}, ${JSON.stringify(b.typeRef)}, __itemDefs)`;
+    }
+    return expr;
+  };
   // Inline function definition: compile as a FEEL expression and call it.
   if (/^function\s*\(/.test(fnText)) {
     const fnExpr = compileFeel(fnText, allNames, cctx);
