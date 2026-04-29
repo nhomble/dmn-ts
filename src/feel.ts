@@ -114,15 +114,15 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   replace: ['input', 'pattern', 'replacement', 'flags'],
   split: ['string', 'delimiter'],
   'string join': ['list', 'delimiter'],
-  floor: ['n'],
-  ceiling: ['n'],
-  abs: ['n'],
+  floor: ['number'],
+  ceiling: ['number'],
+  abs: ['number'],
   modulo: ['dividend', 'divisor'],
-  sqrt: ['n'],
-  log: ['n'],
-  exp: ['n'],
-  odd: ['n'],
-  even: ['n'],
+  sqrt: ['number'],
+  log: ['number'],
+  exp: ['number'],
+  odd: ['number'],
+  even: ['number'],
   decimal: ['n', 'scale'],
   number: ['from'],
   string: ['from'],
@@ -726,6 +726,28 @@ class Parser {
     }
     if (t.kind === 'punct' && t.ch === '(') {
       this.next();
+      // Positive unary test as expression: `(> X)`, `(<= X)`, etc.
+      const lookOp = this.peek();
+      if (
+        lookOp?.kind === 'op' &&
+        ['<=', '>=', '<', '>', '='].includes(lookOp.op)
+      ) {
+        const op = (this.next() as { kind: 'op'; op: string }).op;
+        const operand = this.parseExpression();
+        if (!this.isPunct(')')) throw new Error('feel parse: expected )');
+        this.next();
+        const nullNode: FeelNode = { type: 'null' };
+        if (op === '>')
+          return { type: 'range', lo: operand, hi: nullNode, openLow: true, openHigh: true };
+        if (op === '>=')
+          return { type: 'range', lo: operand, hi: nullNode, openLow: false, openHigh: true };
+        if (op === '<')
+          return { type: 'range', lo: nullNode, hi: operand, openLow: true, openHigh: true };
+        if (op === '<=')
+          return { type: 'range', lo: nullNode, hi: operand, openLow: true, openHigh: false };
+        // = X → singleton range
+        return { type: 'range', lo: operand, hi: operand, openLow: false, openHigh: false };
+      }
       const inner = this.parseExpression();
       // Bracketed range: `(2..4)` or `(2..4]`. Outer `(` means openLow=true.
       if (
@@ -914,14 +936,14 @@ export function emitFeelNode(
       for (let i = node.bindings.length - 1; i >= 0; i--) {
         const b = node.bindings[i];
         const isLast = i === node.bindings.length - 1;
-        inner = `((${emitFeelNode(b.range, ctx)}) as any[]).${isLast ? 'map' : 'flatMap'}((${toJsIdent(b.name)}: any) => ${inner})`;
+        inner = `feel.iterate(${emitFeelNode(b.range, ctx)}).${isLast ? 'map' : 'flatMap'}((${toJsIdent(b.name)}: any) => ${inner})`;
       }
       return inner;
     }
     case 'quant': {
       const b = node.bindings[0];
       const method = node.kind === 'every' ? 'every' : 'some';
-      return `((${emitFeelNode(b.range, ctx)}) as any[]).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body, ctx)} === true)`;
+      return `feel.iterate(${emitFeelNode(b.range, ctx)}).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body, ctx)} === true)`;
     }
     case 'between':
       return `feel.and(feel.le(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.value, ctx)}), feel.le(${emitFeelNode(node.value, ctx)}, ${emitFeelNode(node.hi, ctx)}))`;
@@ -1012,11 +1034,30 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       const scale = Math.max(Math.abs(a), Math.abs(b));
       return diff < 1e-9 || (scale > 0 && diff / scale < 1e-9);
     }
+    if (
+      a && b &&
+      typeof a === 'object' && typeof b === 'object' &&
+      (a as any).__feel === 'range' && (b as any).__feel === 'range'
+    ) {
+      return (
+        feel.eq((a as any).lo, (b as any).lo) === true &&
+        feel.eq((a as any).hi, (b as any).hi) === true &&
+        (a as any).openLow === (b as any).openLow &&
+        (a as any).openHigh === (b as any).openHigh
+      );
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++)
+        if (feel.eq(a[i], b[i]) !== true) return false;
+      return true;
+    }
     if (typeof a === 'object' && typeof b === 'object') {
+      if (Array.isArray(a) !== Array.isArray(b)) return false;
       const ak = Object.keys(a);
       const bk = Object.keys(b);
       if (ak.length !== bk.length) return false;
-      for (const k of ak) if (!feel.eq(a[k], b[k])) return false;
+      for (const k of ak) if (feel.eq((a as any)[k], (b as any)[k]) !== true) return false;
       return true;
     }
     return a === b;
@@ -1055,25 +1096,50 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   // for iteration; otherwise return a tagged bounds object that list_contains
   // and other helpers know how to test.
   range(lo: any, hi: any, openLow = false, openHigh = false): any {
-    if (lo == null || hi == null) return null;
-    if (
-      typeof lo === 'number' &&
-      typeof hi === 'number' &&
-      Number.isInteger(lo) &&
-      Number.isInteger(hi) &&
-      Math.abs(hi - lo) <= 1_000_000
-    ) {
+    if (lo == null && hi == null) return null;
+    return { __feel: 'range', lo, hi, openLow, openHigh };
+  },
+  iterate(v: any): any[] {
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object' && (v as any).__feel === 'range') {
+      const { lo, hi, openLow, openHigh } = v as {
+        lo: any;
+        hi: any;
+        openLow: boolean;
+        openHigh: boolean;
+      };
+      if (
+        lo == null ||
+        hi == null ||
+        typeof lo !== 'number' ||
+        typeof hi !== 'number' ||
+        !Number.isInteger(lo) ||
+        !Number.isInteger(hi)
+      ) {
+        return [];
+      }
+      if (Math.abs(hi - lo) > 1_000_000) return [];
       const out: number[] = [];
       const step = lo <= hi ? 1 : -1;
-      let cur = openLow ? lo + step : lo;
+      const cur = openLow ? lo + step : lo;
       const end = openHigh ? hi - step : hi;
       if (step > 0) for (let i = cur; i <= end; i++) out.push(i);
       else for (let i = cur; i >= end; i--) out.push(i);
       return out;
     }
-    return { __feel: 'range', lo, hi, openLow, openHigh };
+    return [];
+  },
+  // Treat a value as a list. Arrays pass through; ranges expand. Anything
+  // else is null (a "not a list" signal for callers).
+  asList(v: any): any[] | null {
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object' && (v as any).__feel === 'range') {
+      return feel.iterate(v);
+    }
+    return null;
   },
   index(list: any, idx: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const i = Number(idx);
     if (!Number.isFinite(i)) return null;
@@ -1086,6 +1152,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   // \`fn\` is a closure that takes an \`item\` parameter; if it doesn't reference
   // the parameter, the value is treated as the index, otherwise as a filter.
   indexOrFilter(list: any, fn: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     let probe: any;
     let probed = true;
@@ -1146,11 +1213,13 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return s / items.length;
   },
   all(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     for (const x of list) if (x !== true) return x === false ? false : null;
     return true;
   },
   any(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     let sawNull = false;
     for (const x of list) {
@@ -1160,6 +1229,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return sawNull ? null : false;
   },
   sublist(list: any, start: any, length?: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     let s = Number(start);
     if (s < 0) s = list.length + s + 1;
@@ -1168,6 +1238,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return list.slice(Math.max(0, s), Math.max(0, s) + Number(length));
   },
   append(list: any, ...items: any[]): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     return [...list, ...items];
   },
@@ -1185,15 +1256,17 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   list_contains(list: any, item: any): any {
     if (list && typeof list === 'object' && list.__feel === 'range') {
       const { lo, hi, openLow, openHigh } = list;
-      const lower = openLow ? feel.lt(lo, item) : feel.le(lo, item);
-      const upper = openHigh ? feel.lt(item, hi) : feel.le(item, hi);
+      const lower = lo == null ? true : openLow ? feel.lt(lo, item) : feel.le(lo, item);
+      const upper = hi == null ? true : openHigh ? feel.lt(item, hi) : feel.le(item, hi);
       return lower === true && upper === true;
     }
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     for (const x of list) if (feel.eq(x, item) === true) return true;
     return false;
   },
   distinct_values(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const out: any[] = [];
     for (const x of list) {
@@ -1202,6 +1275,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return out;
   },
   flatten(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const out: any[] = [];
     const rec = (xs: any[]) => {
@@ -1211,6 +1285,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return out;
   },
   product(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     let p = 1;
     for (const x of list) {
@@ -1220,12 +1295,14 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return p;
   },
   insert_before(list: any, position: any, newItem: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const i = Number(position);
     if (!Number.isFinite(i) || i < 1 || i > list.length + 1) return null;
     return [...list.slice(0, i - 1), newItem, ...list.slice(i - 1)];
   },
   index_of(list: any, match: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const out: number[] = [];
     list.forEach((x: any, i: number) => {
@@ -1246,6 +1323,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return out;
   },
   remove(list: any, position: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const i = Number(position);
     if (!Number.isFinite(i) || i < 1 || i > list.length) return null;
@@ -1277,6 +1355,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return Math.sqrt(v);
   },
   mode(list: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     if (list.length === 0) return [];
     const counts = new Map<any, number>();
@@ -1288,6 +1367,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     return modes.sort();
   },
   sort(list: any, precedes: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     if (typeof precedes !== 'function') return [...list].sort();
     return [...list].sort((a: any, b: any) => (precedes(a, b) === true ? -1 : 1));
@@ -1350,8 +1430,23 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   prop(obj: any, key: string): any {
     if (obj == null) return null;
     if (typeof obj === 'string') return feel.temporal_prop(obj, key);
+    if (Array.isArray(obj)) {
+      // Expanded ranges (closed-closed integer ranges) — best-effort props.
+      if (key === 'start') return obj[0] ?? null;
+      if (key === 'end') return obj[obj.length - 1] ?? null;
+      if (key === 'start included' || key === 'end included') return true;
+      return null;
+    }
     if (typeof obj === 'object') {
-      return key in obj ? (obj as Record<string, unknown>)[key] : null;
+      const o = obj as Record<string, unknown>;
+      if ((o as any).__feel === 'range') {
+        if (key === 'start') return (o as any).lo;
+        if (key === 'end') return (o as any).hi;
+        if (key === 'start included') return !(o as any).openLow;
+        if (key === 'end included') return !(o as any).openHigh;
+        return null;
+      }
+      return key in o ? o[key] : null;
     }
     return null;
   },
@@ -1477,43 +1572,69 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     }
   },
   string_join(list: any, sep?: any): any {
+    list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
     const s = sep == null || sep?.__named ? '' : String(sep);
     return list.map((x) => (x == null ? '' : String(x))).join(s);
   },
-  floor(n: any): any {
-    return n == null ? null : Math.floor(Number(n));
+  floor(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    return Math.floor(n);
   },
-  ceiling(n: any): any {
-    return n == null ? null : Math.ceil(Number(n));
+  ceiling(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    return Math.ceil(n);
   },
-  abs(n: any): any {
-    return n == null ? null : Math.abs(Number(n));
+  abs(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n === 'number' && Number.isFinite(n)) return Math.abs(n);
+    if (typeof n === 'string' && /^-?P/.test(n)) {
+      return n.startsWith('-') ? n.slice(1) : n;
+    }
+    return null;
   },
-  modulo(a: any, b: any): any {
-    if (a == null || b == null || Number(b) === 0) return null;
-    return Number(a) % Number(b);
+  modulo(...args: any[]): any {
+    if (args.length !== 2) return null;
+    const [a, b] = args;
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b === 0) return null;
+    return a - b * Math.floor(a / b);
   },
-  sqrt(n: any): any {
-    if (n == null) return null;
-    const r = Math.sqrt(Number(n));
+  sqrt(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return null;
+    return Math.sqrt(n);
+  },
+  log(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return null;
+    return Math.log(n);
+  },
+  exp(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    const r = Math.exp(n);
     return Number.isFinite(r) ? r : null;
   },
-  log(n: any): any {
-    if (n == null) return null;
-    const r = Math.log(Number(n));
-    return Number.isFinite(r) ? r : null;
+  odd(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    return Math.abs(Math.trunc(n)) % 2 === 1;
   },
-  exp(n: any): any {
-    if (n == null) return null;
-    const r = Math.exp(Number(n));
-    return Number.isFinite(r) ? r : null;
-  },
-  odd(n: any): any {
-    return n == null ? null : Math.abs(Number(n)) % 2 === 1;
-  },
-  even(n: any): any {
-    return n == null ? null : Math.abs(Number(n)) % 2 === 0;
+  even(...args: any[]): any {
+    if (args.length !== 1) return null;
+    const n = args[0];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    return Math.abs(Math.trunc(n)) % 2 === 0;
   },
   decimal(n: any, scale: any): any {
     if (n == null || scale == null) return null;
@@ -1545,7 +1666,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       case 'boolean':
         return typeof v === 'boolean';
       case 'date':
-        return typeof v === 'string' && /^-?\\d{4,}-\\d{2}-\\d{2}$/.test(v);
+        return typeof v === 'string' && /^-?\\d{4,9}-\\d{2}-\\d{2}$/.test(v);
       case 'time':
         return typeof v === 'string' && /^\\d{2}:\\d{2}:\\d{2}/.test(v) && !v.includes('T');
       case 'dateTime':
@@ -1567,14 +1688,16 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     }
   },
   date(...args: any[]): any {
+    const isLeap = (y: number) =>
+      (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+    const daysIn = (y: number, m: number) => {
+      const t = [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return t[m - 1];
+    };
     const fmt = (y: number, m: number, d: number): string | null => {
       if (![y, m, d].every(Number.isFinite)) return null;
-      // FEEL allows negative years (BCE) and extended (>4-digit) years; reject year 0 and out-of-range month/day.
-      if (y === 0 || m < 1 || m > 12 || d < 1 || d > 31) return null;
-      // Roundtrip via Date.UTC to catch Feb 30 etc. JS handles up to ~275000 reliably.
-      const dt = new Date(Date.UTC(Math.abs(y), m - 1, d));
-      if (Math.abs(y) <= 9999 && dt.getUTCFullYear() !== Math.abs(y)) return null;
-      if (dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) return null;
+      if (y === 0 || m < 1 || m > 12 || d < 1) return null;
+      if (d > daysIn(Math.abs(y), m)) return null;
       const sign = y < 0 ? '-' : '';
       const yStr = String(Math.abs(y));
       return \`\${sign}\${yStr.length < 4 ? yStr.padStart(4, '0') : yStr}-\${String(m).padStart(2, '0')}-\${String(d).padStart(2, '0')}\`;
@@ -1582,9 +1705,15 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;
-      const dtMatch = /^(-?\\d{4,}-\\d{2}-\\d{2})/.exec(a);
-      const iso = dtMatch ? dtMatch[1] : a;
-      if (!/^-?\\d{4,}-\\d{2}-\\d{2}$/.test(iso)) return null;
+      let iso: string;
+      if (/^-?\\d{4,9}-\\d{2}-\\d{2}$/.test(a)) {
+        iso = a;
+      } else {
+        // Accept full date-and-time and extract the date prefix.
+        const dt = /^(-?\\d{4,9}-\\d{2}-\\d{2})T\\d{2}:\\d{2}:\\d{2}/.exec(a);
+        if (!dt) return null;
+        iso = dt[1];
+      }
       const neg = iso.startsWith('-');
       const body = neg ? iso.slice(1) : iso;
       const [y, m, d] = body.split('-').map(Number);
@@ -1628,11 +1757,11 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       const a = args[0];
       if (typeof a !== 'string') return null;
       // Accept a pure date string — append midnight.
-      if (/^-?\\d{4,}-\\d{2}-\\d{2}$/.test(a)) {
+      if (/^-?\\d{4,9}-\\d{2}-\\d{2}$/.test(a)) {
         const d = feel.date(a);
         return d ? \`\${d}T00:00:00\` : null;
       }
-      const m = /^(-?\\d{4,}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}|@[A-Za-z_+\\-/]+)?)$/.exec(a);
+      const m = /^(-?\\d{4,9}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}|@[A-Za-z_+\\-/]+)?)$/.exec(a);
       if (!m) return null;
       const d = feel.date(m[1]);
       const t = feel.time(m[2]);

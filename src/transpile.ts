@@ -67,6 +67,9 @@ export interface DmnContextEntry {
   name?: string;
   typeRef?: string;
   bodyText?: string;
+  // When the entry is a function definition, the JS we emit is an arrow
+  // function with these parameters and the bodyText as its body.
+  functionParameters?: DmnBkmParameter[];
 }
 
 export interface DmnContext {
@@ -196,11 +199,25 @@ export function parseDmn(xml: string): DmnModel {
     let context: DmnContext | undefined;
     if (n.context) {
       const entries: DmnContextEntry[] = arr<any>(n.context.contextEntry).map(
-        (e) => ({
-          name: e.variable?.['@_name'],
-          typeRef: e.variable?.['@_typeRef'],
-          bodyText: e.literalExpression?.text,
-        }),
+        (e) => {
+          const fd = e.functionDefinition;
+          if (fd) {
+            return {
+              name: e.variable?.['@_name'],
+              typeRef: e.variable?.['@_typeRef'],
+              bodyText: fd.literalExpression?.text,
+              functionParameters: arr<any>(fd.formalParameter).map((p) => ({
+                name: p['@_name'],
+                typeRef: p['@_typeRef'],
+              })),
+            };
+          }
+          return {
+            name: e.variable?.['@_name'],
+            typeRef: e.variable?.['@_typeRef'],
+            bodyText: e.literalExpression?.text,
+          };
+        },
       );
       context = { entries };
     }
@@ -510,9 +527,22 @@ function emitContextFn(
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
   for (const e of context.entries) {
-    const body = e.bodyText
-      ? feelExpr(e.bodyText, localNames, cctx)
-      : 'undefined';
+    let body: string;
+    if (e.functionParameters) {
+      const fnLocalNames = [
+        ...localNames,
+        ...e.functionParameters.map((p) => p.name),
+      ];
+      const fnBody = e.bodyText
+        ? feelExpr(e.bodyText, fnLocalNames, cctx)
+        : 'undefined';
+      const params = e.functionParameters
+        .map((p) => `${toJsIdent(p.name)}: any`)
+        .join(', ');
+      body = `((${params}): any => (${fnBody}))`;
+    } else {
+      body = e.bodyText ? feelExpr(e.bodyText, localNames, cctx) : 'undefined';
+    }
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {
@@ -584,13 +614,19 @@ function emitBkm(
   allNames: string[],
   cctx: CompileContext,
 ): string {
+  const text = (bkm.bodyText ?? '').trim();
+  const localNames = [...allNames, ...bkm.parameters.map((p) => p.name)];
+  // If the body is itself a FEEL function literal, the BKM *is* that
+  // function. Emit as a const lambda so the BKM's formal parameters (which
+  // may be absent or duplicate the lambda's) don't shadow the call.
+  if (/^function\s*\(/.test(text)) {
+    const compiled = compileFeel(text, localNames, cctx);
+    return `const ${toJsIdent(bkm.name)}: any = ${compiled};`;
+  }
   const params = bkm.parameters
     .map((p) => `${toJsIdent(p.name)}: any`)
     .join(', ');
-  const localNames = [...allNames, ...bkm.parameters.map((p) => p.name)];
-  const body = bkm.bodyText
-    ? compileFeel(bkm.bodyText, localNames, cctx)
-    : 'undefined';
+  const body = text ? compileFeel(text, localNames, cctx) : 'undefined';
   return `function ${toJsIdent(bkm.name)}(${params}): any {\n  return ${body};\n}`;
 }
 
