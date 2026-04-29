@@ -350,34 +350,47 @@ export const feel: any = {
   },
   diff_dates(a: any, b: any): any {
     if (typeof a !== 'string' || typeof b !== 'string') return null;
-    // For pure dates: result is a days-and-time duration.
     const dateA = /^(-?\d{4,9})-(\d{2})-(\d{2})$/.exec(a);
     const dateB = /^(-?\d{4,9})-(\d{2})-(\d{2})$/.exec(b);
+    // Both pure dates → days-and-time duration.
     if (dateA && dateB) {
       const tA = Date.UTC(Number(dateA[1]), Number(dateA[2]) - 1, Number(dateA[3]));
       const tB = Date.UTC(Number(dateB[1]), Number(dateB[2]) - 1, Number(dateB[3]));
       return feel.dt_format((tA - tB) / 1000);
     }
-    // Both endpoints must agree on whether they carry zone info — mixing
-    // zoned and naive datetimes is undefined per FEEL.
     const isDtZoned = (s: string) =>
       /T.+(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.test(s);
-    const aZ = isDtZoned(a);
-    const bZ = isDtZoned(b);
-    // Pure dates count as naive (no zone) for this comparison.
-    const aHasDate = !!dateA;
-    const bHasDate = !!dateB;
-    const aHasZone = aHasDate ? false : aZ;
-    const bHasZone = bHasDate ? false : bZ;
-    if (aHasZone !== bHasZone) return null;
-    const aForParse = /Z|[+-]\d{2}:\d{2}$/.test(a) ? a : a + 'Z';
-    const bForParse = /Z|[+-]\d{2}:\d{2}$/.test(b) ? b : b + 'Z';
-    const tA = Date.parse(aForParse);
-    const tB = Date.parse(bForParse);
-    if (!Number.isNaN(tA) && !Number.isNaN(tB)) {
-      return feel.dt_format((tA - tB) / 1000);
-    }
-    return null;
+    // Parse a value to its UTC-instant ms, treating a pure date as UTC
+    // midnight (so `date - zoned dateAndTime` is well-defined).
+    const parse = (s: string, dateMatch: RegExpExecArray | null): number | null => {
+      if (dateMatch) {
+        return Date.UTC(
+          Number(dateMatch[1]),
+          Number(dateMatch[2]) - 1,
+          Number(dateMatch[3]),
+        );
+      }
+      const m = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(s);
+      if (!m) return null;
+      const [, dateP, timeP, tz] = m;
+      const ms = feel._dt_to_utc_ms(dateP, timeP, tz ?? '');
+      if (ms == null) return null;
+      if (tz && tz.startsWith('@')) {
+        const off = feel._iana_offset_min(new Date(ms), tz.slice(1));
+        if (off == null) return null;
+        return ms - off * 60_000;
+      }
+      return ms;
+    };
+    // Mixing naive and zoned dateTimes is undefined. A pure date counts as
+    // "either" — it works against both naive and zoned datetimes.
+    const aZoned = !dateA && isDtZoned(a);
+    const bZoned = !dateB && isDtZoned(b);
+    if (!dateA && !dateB && aZoned !== bZoned) return null;
+    const tA = parse(a, dateA);
+    const tB = parse(b, dateB);
+    if (tA == null || tB == null) return null;
+    return feel.dt_format((tA - tB) / 1000);
   },
   pow(a: any, b: any): any {
     if (a == null || b == null) return null;
