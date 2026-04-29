@@ -897,14 +897,15 @@ export function emitFeelNode(
       if (node.namedArgs && node.namedArgs.length) {
         const sig = lookupSignature(node.fn, ctx);
         if (sig) {
+          // FEEL: any named arg not in the signature is an error → null.
+          for (const na of node.namedArgs) {
+            if (!sig.includes(na.name)) return 'null';
+          }
           for (const na of node.namedArgs) {
             const idx = sig.indexOf(na.name);
             const v = emitFeelNode(na.value, ctx);
-            if (idx < 0) positional.push(v);
-            else {
-              while (positional.length <= idx) positional.push('undefined');
-              positional[idx] = v;
-            }
+            while (positional.length <= idx) positional.push('undefined');
+            positional[idx] = v;
           }
         } else {
           const props = node.namedArgs
@@ -1002,23 +1003,209 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (a == null || b == null) return null;
     return Boolean(a) || Boolean(b);
   },
+  // ---- Duration / date helpers (used by add/sub/mul/div) ----
+  // Years-and-months duration → total months; null if not Y/M-only.
+  ym_to_months(s: any): any {
+    if (typeof s !== 'string') return null;
+    const m = /^(-?)P(?:(\\d+)Y)?(?:(\\d+)M)?$/.exec(s);
+    if (!m || (!m[2] && !m[3])) return null;
+    const sign = m[1] === '-' ? -1 : 1;
+    return sign * (Number(m[2] || '0') * 12 + Number(m[3] || '0'));
+  },
+  ym_format(months: any): any {
+    const n = Number(months);
+    if (!Number.isFinite(n)) return null;
+    const sign = n < 0 ? '-' : '';
+    const abs = Math.abs(Math.trunc(n));
+    const y = Math.floor(abs / 12);
+    const mo = abs % 12;
+    let body = '';
+    if (y) body += \`\${y}Y\`;
+    if (mo) body += \`\${mo}M\`;
+    if (!body) body = '0Y';
+    return \`\${sign}P\${body}\`;
+  },
+  // Days-and-time duration → total seconds (may be fractional); null otherwise.
+  dt_to_seconds(s: any): any {
+    if (typeof s !== 'string') return null;
+    const m = /^(-?)P(?:(\\d+)D)?(?:T(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)(?:\\.(\\d+))?S)?)?$/.exec(s);
+    if (!m) return null;
+    if (!m[2] && !m[3] && !m[4] && !m[5]) return null;
+    const sign = m[1] === '-' ? -1 : 1;
+    const d = Number(m[2] || '0');
+    const h = Number(m[3] || '0');
+    const mi = Number(m[4] || '0');
+    const sec =
+      Number(m[5] || '0') + (m[6] ? Number('0.' + m[6]) : 0);
+    return sign * (d * 86400 + h * 3600 + mi * 60 + sec);
+  },
+  dt_format(totalSec: any): any {
+    const n = Number(totalSec);
+    if (!Number.isFinite(n)) return null;
+    const sign = n < 0 ? '-' : '';
+    let abs = Math.abs(n);
+    const d = Math.floor(abs / 86400); abs -= d * 86400;
+    const h = Math.floor(abs / 3600); abs -= h * 3600;
+    const mi = Math.floor(abs / 60); abs -= mi * 60;
+    const s = abs;
+    let date = '';
+    if (d) date += \`\${d}D\`;
+    let time = '';
+    if (h) time += \`\${h}H\`;
+    if (mi) time += \`\${mi}M\`;
+    if (s !== 0) {
+      const isInt = Number.isInteger(s);
+      time += isInt ? \`\${s}S\` : \`\${s}S\`;
+    }
+    if (!date && !time) date = '0D';
+    return \`\${sign}P\${date}\${time ? 'T' + time : ''}\`;
+  },
+  is_duration(v: any): boolean {
+    return typeof v === 'string' && /^-?P/.test(v);
+  },
+  is_date_or_dt(v: any): boolean {
+    if (typeof v !== 'string') return false;
+    return /^-?\\d{4,9}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2})?/.test(v);
+  },
   add(a: any, b: any): any {
     if (a == null || b == null) return null;
+    if (feel.is_duration(a) && feel.is_duration(b)) {
+      const yA = feel.ym_to_months(a), yB = feel.ym_to_months(b);
+      if (yA != null && yB != null) return feel.ym_format(yA + yB);
+      const dA = feel.dt_to_seconds(a), dB = feel.dt_to_seconds(b);
+      if (dA != null && dB != null) return feel.dt_format(dA + dB);
+      return null;
+    }
+    if (feel.is_date_or_dt(a) && feel.is_duration(b)) {
+      return feel.add_date_duration(a, b);
+    }
+    if (feel.is_date_or_dt(b) && feel.is_duration(a)) {
+      return feel.add_date_duration(b, a);
+    }
     if (typeof a === 'string' || typeof b === 'string') return String(a) + String(b);
-    return Number(a) + Number(b);
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a + b;
   },
   sub(a: any, b: any): any {
     if (a == null || b == null) return null;
-    return Number(a) - Number(b);
+    if (feel.is_duration(a) && feel.is_duration(b)) {
+      const yA = feel.ym_to_months(a), yB = feel.ym_to_months(b);
+      if (yA != null && yB != null) return feel.ym_format(yA - yB);
+      const dA = feel.dt_to_seconds(a), dB = feel.dt_to_seconds(b);
+      if (dA != null && dB != null) return feel.dt_format(dA - dB);
+      return null;
+    }
+    if (feel.is_date_or_dt(a) && feel.is_duration(b)) {
+      // Negate the duration and add.
+      const negated = b.startsWith('-') ? b.slice(1) : '-' + b;
+      return feel.add_date_duration(a, negated);
+    }
+    if (feel.is_date_or_dt(a) && feel.is_date_or_dt(b)) {
+      return feel.diff_dates(a, b);
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a - b;
   },
   mul(a: any, b: any): any {
     if (a == null || b == null) return null;
-    return Number(a) * Number(b);
+    if (feel.is_duration(a) && typeof b === 'number') return feel.scale_duration(a, b);
+    if (feel.is_duration(b) && typeof a === 'number') return feel.scale_duration(b, a);
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a * b;
   },
   div(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (Number(b) === 0) return null;
-    return Number(a) / Number(b);
+    if (feel.is_duration(a) && typeof b === 'number') {
+      if (b === 0) return null;
+      return feel.scale_duration(a, 1 / b);
+    }
+    if (feel.is_duration(a) && feel.is_duration(b)) {
+      const yA = feel.ym_to_months(a), yB = feel.ym_to_months(b);
+      if (yA != null && yB != null) return yB === 0 ? null : yA / yB;
+      const dA = feel.dt_to_seconds(a), dB = feel.dt_to_seconds(b);
+      if (dA != null && dB != null) return dB === 0 ? null : dA / dB;
+      return null;
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    if (b === 0) return null;
+    return a / b;
+  },
+  scale_duration(d: any, n: any): any {
+    if (typeof d !== 'string' || typeof n !== 'number') return null;
+    const ym = feel.ym_to_months(d);
+    if (ym != null) return feel.ym_format(Math.trunc(ym * n));
+    const dt = feel.dt_to_seconds(d);
+    if (dt != null) return feel.dt_format(dt * n);
+    return null;
+  },
+  add_date_duration(d: any, dur: any): any {
+    if (typeof d !== 'string' || typeof dur !== 'string') return null;
+    // Pure date? then we add years/months/days, integer arithmetic.
+    const dateOnly = /^(-?\\d{4,9})-(\\d{2})-(\\d{2})$/.exec(d);
+    const ym = feel.ym_to_months(dur);
+    if (dateOnly && ym != null) {
+      const y = Number(dateOnly[1]);
+      const mo = Number(dateOnly[2]);
+      const da = Number(dateOnly[3]);
+      const total = y * 12 + (mo - 1) + ym;
+      const newY = Math.floor(total / 12);
+      const newMo = (total % 12 + 12) % 12 + 1;
+      return feel.date(newY, newMo, da);
+    }
+    const dt = feel.dt_to_seconds(dur);
+    if (dateOnly && dt != null) {
+      const y = Number(dateOnly[1]);
+      const mo = Number(dateOnly[2]);
+      const da = Number(dateOnly[3]);
+      // Convert to a JS Date in UTC, add seconds, convert back. Won't preserve fractional seconds.
+      const base = new Date(Date.UTC(Math.abs(y), mo - 1, da));
+      base.setUTCSeconds(base.getUTCSeconds() + dt);
+      return feel.date(
+        base.getUTCFullYear() * (y < 0 ? -1 : 1),
+        base.getUTCMonth() + 1,
+        base.getUTCDate(),
+      );
+    }
+    // Date-and-time: extract date + time, manipulate, recombine.
+    const dtMatch = /^(-?\\d{4,9}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)/.exec(d);
+    if (dtMatch) {
+      const baseSec = feel.dt_to_seconds(dur);
+      if (baseSec != null) {
+        const ms = Date.parse(d);
+        if (!Number.isNaN(ms)) {
+          const out = new Date(ms + baseSec * 1000);
+          const iso = out.toISOString().slice(0, 19);
+          return iso;
+        }
+      }
+      const months = feel.ym_to_months(dur);
+      if (months != null) {
+        const ms = Date.parse(d);
+        if (!Number.isNaN(ms)) {
+          const out = new Date(ms);
+          out.setUTCMonth(out.getUTCMonth() + months);
+          return out.toISOString().slice(0, 19);
+        }
+      }
+    }
+    return null;
+  },
+  diff_dates(a: any, b: any): any {
+    if (typeof a !== 'string' || typeof b !== 'string') return null;
+    // For pure dates: result is a days-and-time duration.
+    const dateA = /^(-?\\d{4,9})-(\\d{2})-(\\d{2})$/.exec(a);
+    const dateB = /^(-?\\d{4,9})-(\\d{2})-(\\d{2})$/.exec(b);
+    if (dateA && dateB) {
+      const tA = Date.UTC(Number(dateA[1]), Number(dateA[2]) - 1, Number(dateA[3]));
+      const tB = Date.UTC(Number(dateB[1]), Number(dateB[2]) - 1, Number(dateB[3]));
+      return feel.dt_format((tA - tB) / 1000);
+    }
+    const tA = Date.parse(a);
+    const tB = Date.parse(b);
+    if (!Number.isNaN(tA) && !Number.isNaN(tB)) {
+      return feel.dt_format((tA - tB) / 1000);
+    }
+    return null;
   },
   pow(a: any, b: any): any {
     if (a == null || b == null) return null;
@@ -1697,6 +1884,7 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     const fmt = (y: number, m: number, d: number): string | null => {
       if (![y, m, d].every(Number.isFinite)) return null;
       if (y === 0 || m < 1 || m > 12 || d < 1) return null;
+      if (Math.abs(y) > 999_999_999) return null;
       if (d > daysIn(Math.abs(y), m)) return null;
       const sign = y < 0 ? '-' : '';
       const yStr = String(Math.abs(y));
@@ -1709,11 +1897,13 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       if (/^-?\\d{4,9}-\\d{2}-\\d{2}$/.test(a)) {
         iso = a;
       } else {
-        // Accept full date-and-time and extract the date prefix.
         const dt = /^(-?\\d{4,9}-\\d{2}-\\d{2})T\\d{2}:\\d{2}:\\d{2}/.exec(a);
         if (!dt) return null;
         iso = dt[1];
       }
+      // 5+ digit years must not start with 0 (no leading-zero extended year).
+      const yearPart = iso.startsWith('-') ? iso.slice(1).split('-')[0] : iso.split('-')[0];
+      if (yearPart.length > 4 && yearPart.startsWith('0')) return null;
       const neg = iso.startsWith('-');
       const body = neg ? iso.slice(1) : iso;
       const [y, m, d] = body.split('-').map(Number);

@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import {
   compileFeel,
   FEEL_RUNTIME_SOURCE,
+  FEEL_BUILTINS,
+  FEEL_BUILTIN_PARAMS,
   type CompileContext,
 } from './feel.js';
 import { toJsIdent } from './ident.js';
@@ -48,6 +50,7 @@ export interface DmnDecision {
   literalExpressionText?: string;
   decisionTable?: DmnDecisionTable;
   context?: DmnContext;
+  invocation?: DmnInvocation;
 }
 
 export interface DmnBkmParameter {
@@ -61,6 +64,19 @@ export interface DmnBkm {
   typeRef?: string;
   parameters: DmnBkmParameter[];
   bodyText?: string;
+  decisionTable?: DmnDecisionTable;
+  context?: DmnContext;
+  invocation?: DmnInvocation;
+}
+
+export interface DmnInvocationBinding {
+  name: string;
+  bodyText?: string;
+}
+
+export interface DmnInvocation {
+  fnText?: string;
+  bindings: DmnInvocationBinding[];
 }
 
 export interface DmnContextEntry {
@@ -70,6 +86,10 @@ export interface DmnContextEntry {
   // When the entry is a function definition, the JS we emit is an arrow
   // function with these parameters and the bodyText as its body.
   functionParameters?: DmnBkmParameter[];
+  // Alternative entry-body forms.
+  decisionTable?: DmnDecisionTable;
+  invocation?: DmnInvocation;
+  context?: DmnContext;
 }
 
 export interface DmnContext {
@@ -98,6 +118,7 @@ const xmlParser = new XMLParser({
       'businessKnowledgeModel',
       'formalParameter',
       'contextEntry',
+      'binding',
     ].includes(name),
 });
 
@@ -139,12 +160,22 @@ export function parseDmn(xml: string): DmnModel {
         }))
       : [];
     const bodyText: string | undefined = enc?.literalExpression?.text;
+    const bkmTable = enc?.decisionTable
+      ? parseDecisionTableXml(enc.decisionTable)
+      : undefined;
+    const bkmContext = enc?.context ? parseContextXml(enc.context) : undefined;
+    const bkmInvocation = enc?.invocation
+      ? parseInvocationXml(enc.invocation)
+      : undefined;
     return {
       id: n['@_id'],
       name: n['@_name'],
       typeRef: n.variable?.['@_typeRef'],
       parameters,
       bodyText,
+      decisionTable: bkmTable,
+      context: bkmContext,
+      invocation: bkmInvocation,
     };
   });
 
@@ -167,60 +198,15 @@ export function parseDmn(xml: string): DmnModel {
     const literalExpressionText: string | undefined =
       n.literalExpression?.text ?? undefined;
 
-    let decisionTable: DmnDecisionTable | undefined;
-    if (n.decisionTable) {
-      const dt = n.decisionTable;
-      const inputs: DmnDecisionTableInput[] = arr<any>(dt.input).map((i) => ({
-        text: i.inputExpression?.text ?? '',
-      }));
-      const outputs: DmnDecisionTableOutput[] = arr<any>(dt.output).map((o) => {
-        const ovText: string | undefined = o.outputValues?.text;
-        const outputValues = ovText
-          ? parseOutputValuesList(String(ovText))
-          : undefined;
-        return {
-          name: o['@_name'],
-          typeRef: o['@_typeRef'],
-          outputValues,
-        };
-      });
-      const rules: DmnDecisionTableRule[] = arr<any>(dt.rule).map((r) => ({
-        inputEntries: arr<any>(r.inputEntry).map((e) => String(e?.text ?? '')),
-        outputEntries: arr<any>(r.outputEntry).map((e) => String(e?.text ?? '')),
-      }));
-      decisionTable = {
-        hitPolicy: dt['@_hitPolicy'] ?? 'UNIQUE',
-        aggregation: dt['@_aggregation'],
-        inputs,
-        outputs,
-        rules,
-      };
-    }
-    let context: DmnContext | undefined;
-    if (n.context) {
-      const entries: DmnContextEntry[] = arr<any>(n.context.contextEntry).map(
-        (e) => {
-          const fd = e.functionDefinition;
-          if (fd) {
-            return {
-              name: e.variable?.['@_name'],
-              typeRef: e.variable?.['@_typeRef'],
-              bodyText: fd.literalExpression?.text,
-              functionParameters: arr<any>(fd.formalParameter).map((p) => ({
-                name: p['@_name'],
-                typeRef: p['@_typeRef'],
-              })),
-            };
-          }
-          return {
-            name: e.variable?.['@_name'],
-            typeRef: e.variable?.['@_typeRef'],
-            bodyText: e.literalExpression?.text,
-          };
-        },
-      );
-      context = { entries };
-    }
+    const decisionTable = n.decisionTable
+      ? parseDecisionTableXml(n.decisionTable)
+      : undefined;
+    const context: DmnContext | undefined = n.context
+      ? parseContextXml(n.context)
+      : undefined;
+    const invocation: DmnInvocation | undefined = n.invocation
+      ? parseInvocationXml(n.invocation)
+      : undefined;
     return {
       id: n['@_id'],
       name: n['@_name'],
@@ -230,6 +216,7 @@ export function parseDmn(xml: string): DmnModel {
       literalExpressionText,
       decisionTable,
       context,
+      invocation,
     };
   });
 
@@ -238,6 +225,80 @@ export function parseDmn(xml: string): DmnModel {
     inputData,
     decisions,
     bkms,
+  };
+}
+
+function parseInvocationXml(inv: any): DmnInvocation {
+  const bindings: DmnInvocationBinding[] = arr<any>(inv.binding).map((b) => ({
+    name: b.parameter?.['@_name'] ?? '',
+    bodyText: b.literalExpression?.text,
+  }));
+  return {
+    fnText: inv.literalExpression?.text,
+    bindings,
+  };
+}
+
+function parseContextXml(ctx: any): DmnContext {
+  const entries: DmnContextEntry[] = arr<any>(ctx.contextEntry).map(parseContextEntryXml);
+  return { entries };
+}
+
+function parseContextEntryXml(e: any): DmnContextEntry {
+  const out: DmnContextEntry = {
+    name: e.variable?.['@_name'],
+    typeRef: e.variable?.['@_typeRef'],
+  };
+  if (e.functionDefinition) {
+    const fd = e.functionDefinition;
+    out.bodyText = fd.literalExpression?.text;
+    out.functionParameters = arr<any>(fd.formalParameter).map((p) => ({
+      name: p['@_name'],
+      typeRef: p['@_typeRef'],
+    }));
+    return out;
+  }
+  if (e.decisionTable) {
+    out.decisionTable = parseDecisionTableXml(e.decisionTable);
+    return out;
+  }
+  if (e.invocation) {
+    out.invocation = parseInvocationXml(e.invocation);
+    return out;
+  }
+  if (e.context) {
+    out.context = parseContextXml(e.context);
+    return out;
+  }
+  out.bodyText = e.literalExpression?.text;
+  return out;
+}
+
+function parseDecisionTableXml(dt: any): DmnDecisionTable {
+  const inputs: DmnDecisionTableInput[] = arr<any>(dt.input).map((i) => ({
+    text: i.inputExpression?.text ?? '',
+  }));
+  const outputs: DmnDecisionTableOutput[] = arr<any>(dt.output).map((o) => {
+    const ovText: string | undefined = o.outputValues?.text;
+    const outputValues = ovText
+      ? parseOutputValuesList(String(ovText))
+      : undefined;
+    return {
+      name: o['@_name'],
+      typeRef: o['@_typeRef'],
+      outputValues,
+    };
+  });
+  const rules: DmnDecisionTableRule[] = arr<any>(dt.rule).map((r) => ({
+    inputEntries: arr<any>(r.inputEntry).map((e) => String(e?.text ?? '')),
+    outputEntries: arr<any>(r.outputEntry).map((e) => String(e?.text ?? '')),
+  }));
+  return {
+    hitPolicy: dt['@_hitPolicy'] ?? 'UNIQUE',
+    aggregation: dt['@_aggregation'],
+    inputs,
+    outputs,
+    rules,
   };
 }
 
@@ -439,38 +500,24 @@ function emitHitPolicyTail(
   return [...sortLines, `    ${ret}`];
 }
 
-function emitDecisionTableFn(
-  decision: DmnDecision,
+// Emit the body lines of a decision-table evaluation (without any outer
+// function wrapper). Indentation is 4 spaces.
+function emitDecisionTableBody(
   table: DmnDecisionTable,
   allNames: string[],
   cctx: CompileContext,
-): string {
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
-  });
-
+): string[] {
   const inputExprsJs = table.inputs.map((i) =>
     feelExpr(i.text, allNames, cctx),
   );
-
   const outputIsObject =
     table.outputs.length > 1 ||
     (table.outputs.length === 1 && !!table.outputs[0].name);
-
   const lines: string[] = [];
-  lines.push(`  ${JSON.stringify(decision.name)}: (ctx) => {`);
-  lines.push(...inputBindings);
-  lines.push(...decisionBindings);
   inputExprsJs.forEach((e, idx) => {
     lines.push(`    const __in${idx}: any = ${e};`);
   });
   lines.push(`    const __matches: any[] = [];`);
-
   table.rules.forEach((rule, ri) => {
     const tests = rule.inputEntries.map((entry, idx) =>
       translateUnaryTest(entry, `__in${idx}`, allNames),
@@ -489,7 +536,6 @@ function emitDecisionTableFn(
     lines.push(`    // rule ${ri + 1}`);
     lines.push(`    if (${cond}) { __matches.push(${outExpr}); }`);
   });
-
   lines.push(
     ...emitHitPolicyTail(
       table.hitPolicy,
@@ -498,8 +544,133 @@ function emitDecisionTableFn(
       outputIsObject,
     ),
   );
-  lines.push(`  },`);
-  return lines.join('\n');
+  return lines;
+}
+
+function emitDecisionTableFn(
+  decision: DmnDecision,
+  table: DmnDecisionTable,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const inputBindings = decision.requiredInputs.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
+  });
+  const decisionBindings = decision.requiredDecisions.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+  });
+  return [
+    `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+    ...inputBindings,
+    ...decisionBindings,
+    ...emitDecisionTableBody(table, allNames, cctx),
+    `  },`,
+  ].join('\n');
+}
+
+function emitInvocationCall(
+  inv: DmnInvocation,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  if (!inv.fnText) return 'null';
+  const fnName = inv.fnText.trim();
+  const compiledArgValue = (b: DmnInvocationBinding) =>
+    feelExpr(b.bodyText ?? 'null', allNames, cctx);
+  const sig = cctx.signatures[fnName] ?? FEEL_BUILTIN_PARAMS[fnName];
+  const fnExpr = FEEL_BUILTINS[fnName]
+    ? `feel.${FEEL_BUILTINS[fnName]}`
+    : toJsIdent(fnName);
+  if (sig) {
+    const positional: string[] = sig.map((p) => {
+      const b = inv.bindings.find((x) => x.name === p);
+      return b ? compiledArgValue(b) : 'undefined';
+    });
+    for (const b of inv.bindings) {
+      if (!sig.includes(b.name)) positional.push(compiledArgValue(b));
+    }
+    return `${fnExpr}(${positional.join(', ')})`;
+  }
+  const named = inv.bindings
+    .map((b) => `${JSON.stringify(b.name)}: ${compiledArgValue(b)}`)
+    .join(', ');
+  return `${fnExpr}({ __named: { ${named} } })`;
+}
+
+// Generic per-entry body compiler. Returns the JS expression for whatever
+// form the entry takes (literal, function-def, decision-table, invocation,
+// nested context).
+function emitContextEntryBody(
+  e: DmnContextEntry,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  if (e.functionParameters) {
+    const fnLocalNames = [
+      ...allNames,
+      ...e.functionParameters.map((p) => p.name),
+    ];
+    const fnBody = e.bodyText
+      ? feelExpr(e.bodyText, fnLocalNames, cctx)
+      : 'undefined';
+    const params = e.functionParameters
+      .map((p) => `${toJsIdent(p.name)}: any`)
+      .join(', ');
+    return `((${params}): any => (${fnBody}))`;
+  }
+  if (e.decisionTable) {
+    const body = emitDecisionTableBody(e.decisionTable, allNames, cctx);
+    return `(() => {\n${body.join('\n')}\n  })()`;
+  }
+  if (e.invocation) {
+    return emitInvocationCall(e.invocation, allNames, cctx);
+  }
+  if (e.context) {
+    return emitContextValue(e.context, allNames, cctx);
+  }
+  return e.bodyText ? feelExpr(e.bodyText, allNames, cctx) : 'undefined';
+}
+
+// Produce a JS expression that evaluates a context to either an object (when
+// all entries are named) or the final unnamed entry.
+function emitContextValue(
+  context: DmnContext,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const localNames = [...allNames];
+  const declared = new Set<string>();
+  const lines: string[] = [];
+  const namedKeys: { dmnName: string; ident: string }[] = [];
+  let finalReturn: string | null = null;
+  for (const e of context.entries) {
+    const body = emitContextEntryBody(e, localNames, cctx);
+    if (e.name) {
+      const ident = toJsIdent(e.name);
+      if (declared.has(ident)) {
+        lines.push(`    ${ident} = ${body};`);
+      } else {
+        lines.push(`    let ${ident}: any = ${body};`);
+        declared.add(ident);
+      }
+      namedKeys.push({ dmnName: e.name, ident });
+      if (!localNames.includes(e.name)) localNames.push(e.name);
+    } else {
+      finalReturn = body;
+    }
+  }
+  let ret: string;
+  if (finalReturn !== null) {
+    ret = finalReturn;
+  } else {
+    const props = namedKeys
+      .map((k) => `${JSON.stringify(k.dmnName)}: ${k.ident}`)
+      .join(', ');
+    ret = `{ ${props} }`;
+  }
+  return `(() => {\n${lines.join('\n')}\n    return ${ret};\n  })()`;
 }
 
 function emitContextFn(
@@ -527,22 +698,7 @@ function emitContextFn(
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
   for (const e of context.entries) {
-    let body: string;
-    if (e.functionParameters) {
-      const fnLocalNames = [
-        ...localNames,
-        ...e.functionParameters.map((p) => p.name),
-      ];
-      const fnBody = e.bodyText
-        ? feelExpr(e.bodyText, fnLocalNames, cctx)
-        : 'undefined';
-      const params = e.functionParameters
-        .map((p) => `${toJsIdent(p.name)}: any`)
-        .join(', ');
-      body = `((${params}): any => (${fnBody}))`;
-    } else {
-      body = e.bodyText ? feelExpr(e.bodyText, localNames, cctx) : 'undefined';
-    }
+    const body = emitContextEntryBody(e, localNames, cctx);
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {
@@ -575,6 +731,33 @@ function emitContextFn(
   ].join('\n');
 }
 
+function emitInvocationFn(
+  decision: DmnDecision,
+  inv: DmnInvocation,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const inputBindings = decision.requiredInputs.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
+  });
+  const decisionBindings = decision.requiredDecisions.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+  });
+  let expr = emitInvocationCall(inv, allNames, cctx);
+  if (isScalarTypeRef(decision.typeRef)) {
+    expr = `feel.singleton(${expr})`;
+  }
+  return [
+    `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+    ...inputBindings,
+    ...decisionBindings,
+    `    return ${expr};`,
+    `  },`,
+  ].join('\n');
+}
+
 function emitDecisionFn(
   decision: DmnDecision,
   allNames: string[],
@@ -585,6 +768,9 @@ function emitDecisionFn(
   }
   if (decision.context) {
     return emitContextFn(decision, decision.context, allNames, cctx);
+  }
+  if (decision.invocation) {
+    return emitInvocationFn(decision, decision.invocation, allNames, cctx);
   }
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
@@ -616,16 +802,25 @@ function emitBkm(
 ): string {
   const text = (bkm.bodyText ?? '').trim();
   const localNames = [...allNames, ...bkm.parameters.map((p) => p.name)];
-  // If the body is itself a FEEL function literal, the BKM *is* that
-  // function. Emit as a const lambda so the BKM's formal parameters (which
-  // may be absent or duplicate the lambda's) don't shadow the call.
+  const params = bkm.parameters
+    .map((p) => `${toJsIdent(p.name)}: any`)
+    .join(', ');
   if (/^function\s*\(/.test(text)) {
     const compiled = compileFeel(text, localNames, cctx);
     return `const ${toJsIdent(bkm.name)}: any = ${compiled};`;
   }
-  const params = bkm.parameters
-    .map((p) => `${toJsIdent(p.name)}: any`)
-    .join(', ');
+  if (bkm.decisionTable) {
+    const body = emitDecisionTableBody(bkm.decisionTable, localNames, cctx);
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n${body.join('\n')}\n}`;
+  }
+  if (bkm.context) {
+    const value = emitContextValue(bkm.context, localNames, cctx);
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n    return ${value};\n}`;
+  }
+  if (bkm.invocation) {
+    const expr = emitInvocationCall(bkm.invocation, localNames, cctx);
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n    return ${expr};\n}`;
+  }
   const body = text ? compileFeel(text, localNames, cctx) : 'undefined';
   return `function ${toJsIdent(bkm.name)}(${params}): any {\n  return ${body};\n}`;
 }
