@@ -136,7 +136,7 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   odd: ['number'],
   even: ['number'],
   decimal: ['n', 'scale'],
-  number: ['from'],
+  number: ['from', 'grouping separator', 'decimal separator'],
   string: ['from'],
   // Multi-arity constructors: signature is the union of all named-param
   // forms, with leading slots padded as `undefined` when the call uses a
@@ -721,20 +721,26 @@ class Parser {
     return expr;
   }
 
-  // Parse a single call argument: either `name: expr` (named) or `expr` (positional).
+  // Parse a single call argument: either `name(s): expr` (named, possibly
+  // multi-word) or `expr` (positional). Look ahead for `ident+ :` and only
+  // consume that prefix when the colon is the next non-ident token.
   private parseCallArg(
     positional: FeelNode[],
     named: { name: string; value: FeelNode }[],
   ): void {
-    const t = this.peek();
-    const colon = this.peek(1);
-    if (t?.kind === 'ident' && colon?.kind === 'punct' && colon.ch === ':') {
-      const nameTok = this.next() as { kind: 'ident'; name: string };
+    let i = this.pos;
+    while (this.tokens[i]?.kind === 'ident') i++;
+    const after = this.tokens[i];
+    if (i > this.pos && after?.kind === 'punct' && after.ch === ':') {
+      const parts: string[] = [];
+      while (this.peek()?.kind === 'ident') {
+        parts.push((this.next() as { kind: 'ident'; name: string }).name);
+      }
       this.next(); // consume ':'
-      named.push({ name: nameTok.name, value: this.parseExpression() });
-    } else {
-      positional.push(this.parseExpression());
+      named.push({ name: parts.join(' '), value: this.parseExpression() });
+      return;
     }
+    positional.push(this.parseExpression());
   }
   private parsePrimary(): FeelNode {
     const t = this.peek();

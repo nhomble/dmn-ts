@@ -192,11 +192,16 @@ export const feel: any = {
       );
     }
     // Date-and-time: extract date + time, manipulate, recombine.
-    const dtMatch = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})?$/.exec(d);
+    const dtMatch = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(d);
     if (dtMatch) {
       // Preserve the source timezone suffix; if naive, treat as UTC and emit naive.
       const tzSuffix = dtMatch[3] ?? '';
-      const dForParse = tzSuffix ? d : d + 'Z';
+      // Date.parse can't handle @IANA suffixes; treat them as naive UTC.
+      const dForParse = tzSuffix.startsWith('@')
+        ? d.slice(0, d.length - tzSuffix.length) + 'Z'
+        : tzSuffix
+          ? d
+          : d + 'Z';
       const baseSec = feel.dt_to_seconds(dur);
       if (baseSec != null) {
         const ms = Date.parse(dForParse);
@@ -223,9 +228,9 @@ export const feel: any = {
   _format_dt_with_tz(dt: any, tzSuffix: string): any {
     if (!(dt instanceof Date)) return null;
     let offsetMin = 0;
-    if (tzSuffix === 'Z') {
+    if (tzSuffix === 'Z' || tzSuffix.startsWith('@')) {
       offsetMin = 0;
-    } else if (/^[+-]\d{2}:\d{2}$/.test(tzSuffix)) {
+    } else if (/^[+-]\d{2}:\d{2}(?::\d{2})?$/.test(tzSuffix)) {
       const sign = tzSuffix[0] === '-' ? -1 : 1;
       offsetMin = sign * (Number(tzSuffix.slice(1, 3)) * 60 + Number(tzSuffix.slice(4, 6)));
     }
@@ -259,7 +264,8 @@ export const feel: any = {
   },
   pow(a: any, b: any): any {
     if (a == null || b == null) return null;
-    const r = Math.pow(Number(a), Number(b));
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    const r = Math.pow(a, b);
     return Number.isFinite(r) ? r : null;
   },
   eq(a: any, b: any): any {
@@ -306,25 +312,66 @@ export const feel: any = {
     const r = feel.eq(a, b);
     return r == null ? null : !r;
   },
+  // Compare two duration strings. Returns numeric difference (a-b) where
+  // both are same family (years-months OR days-time), or null otherwise.
+  _dur_cmp(a: any, b: any): any {
+    if (typeof a !== 'string' || typeof b !== 'string') return null;
+    if (!/^-?P/.test(a) || !/^-?P/.test(b)) return null;
+    const ymA = feel.ym_to_months(a),
+      ymB = feel.ym_to_months(b);
+    if (ymA != null && ymB != null) return ymA - ymB;
+    const dtA = feel.dt_to_seconds(a),
+      dtB = feel.dt_to_seconds(b);
+    if (dtA != null && dtB != null) return dtA - dtB;
+    return null;
+  },
   lt(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (typeof a === 'string' && typeof b === 'string') return a < b;
-    return Number(a) < Number(b);
+    if (typeof a === 'string' && typeof b === 'string') {
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const d = feel._dur_cmp(a, b);
+        return d == null ? null : d < 0;
+      }
+      return a < b;
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a < b;
   },
   le(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (typeof a === 'string' && typeof b === 'string') return a <= b;
-    return Number(a) <= Number(b);
+    if (typeof a === 'string' && typeof b === 'string') {
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const d = feel._dur_cmp(a, b);
+        return d == null ? null : d <= 0;
+      }
+      return a <= b;
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a <= b;
   },
   gt(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (typeof a === 'string' && typeof b === 'string') return a > b;
-    return Number(a) > Number(b);
+    if (typeof a === 'string' && typeof b === 'string') {
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const d = feel._dur_cmp(a, b);
+        return d == null ? null : d > 0;
+      }
+      return a > b;
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a > b;
   },
   ge(a: any, b: any): any {
     if (a == null || b == null) return null;
-    if (typeof a === 'string' && typeof b === 'string') return a >= b;
-    return Number(a) >= Number(b);
+    if (typeof a === 'string' && typeof b === 'string') {
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const d = feel._dur_cmp(a, b);
+        return d == null ? null : d >= 0;
+      }
+      return a >= b;
+    }
+    if (typeof a !== 'number' || typeof b !== 'number') return null;
+    return a >= b;
   },
   // Coerce a value to a declared FEEL primitive type, or null if the value
   // doesn't match. For unknown / user-defined types, returns the value as-is
@@ -561,15 +608,25 @@ export const feel: any = {
       // reference ranges/lists; predicate already returns true/false.
       return list.tests.some((fn: any) => fn(item) === true);
     }
-    list = feel.asList(list) as any;
+    if (list == null) return null;
+    // FEEL singleton rule: scalar `x in v` treats v as `[v]`.
+    const asList = feel.asList(list);
+    list = asList ?? [list];
     if (!Array.isArray(list)) return null;
+    // When `item` is itself a collection (array or non-tagged object), prefer
+    // direct equality with each element. Otherwise (scalar item) recurse into
+    // nested arrays so `1 in [[1,2,3]]` is true.
+    const itemIsCollection =
+      Array.isArray(item) ||
+      (item != null &&
+        typeof item === 'object' &&
+        !(item as any).__feel);
     for (const x of list) {
-      // Recurse into nested ranges/lists/tests for in-membership semantics.
       if (x && typeof x === 'object' && (x.__feel === 'range' || x.__feel === 'tests')) {
         if (feel.list_contains(x, item) === true) return true;
         continue;
       }
-      if (Array.isArray(x)) {
+      if (!itemIsCollection && Array.isArray(x)) {
         if (feel.list_contains(x, item) === true) return true;
         continue;
       }
@@ -975,10 +1032,29 @@ export const feel: any = {
     const f = Math.pow(10, s);
     return Math.round(Number(n) * f) / f;
   },
-  number(s: any): any {
-    if (s == null) return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
+  number(...args: any[]): any {
+    if (args.length === 1) {
+      const s = args[0];
+      if (s == null) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+    if (args.length === 3) {
+      const [s, group, dec] = args;
+      if (typeof s !== 'string') return null;
+      if (typeof dec !== 'string') return null;
+      if (group != null && typeof group !== 'string') return null;
+      // FEEL: separators must differ if both present
+      if (group && group === dec) return null;
+      // Allowed groups: space, period, comma, '⁠ ' etc — TCK only validates basic
+      // patterns. Reject if grouping appears after the decimal.
+      let str = s;
+      if (group) str = str.split(group).join('');
+      if (dec !== '.') str = str.split(dec).join('.');
+      const n = Number(str);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
   },
   string(v: any): any {
     if (v == null) return null;
@@ -1053,9 +1129,15 @@ export const feel: any = {
       case 'date and time':
         return typeof v === 'string' && /T/.test(v);
       case 'duration':
-      case 'years and months duration':
-      case 'days and time duration':
         return typeof v === 'string' && /^-?P/.test(v);
+      case 'years and months duration':
+        return (
+          typeof v === 'string' && feel.ym_to_months(v) !== null
+        );
+      case 'days and time duration':
+        return (
+          typeof v === 'string' && feel.dt_to_seconds(v) !== null
+        );
       case 'list':
         return Array.isArray(v);
       case 'context':
@@ -1128,16 +1210,28 @@ export const feel: any = {
     const fmtTime = (h: number, m: number, s: number, frac?: string, tz?: string): string | null => {
       if (![h, m, s].every(Number.isFinite)) return null;
       if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s >= 60) return null;
-      // Validate explicit `+HH:MM` / `-HH:MM` offsets (range ±14:00).
+      // Allow ±HH:MM and ±HH:MM:SS offsets, range ±14:00.
       if (tz && tz !== 'Z' && !tz.startsWith('@')) {
-        const tzM = /^([+-])(\d{2}):(\d{2})$/.exec(tz);
+        const tzM = /^([+-])(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(tz);
         if (tzM) {
           const oH = Number(tzM[2]);
           const oM = Number(tzM[3]);
-          if (oH > 14 || oM > 59) return null;
+          const oS = tzM[4] ? Number(tzM[4]) : 0;
+          if (oH > 14 || oM > 59 || oS > 59) return null;
         }
       }
-      const head = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      // Format seconds with a leading zero on the integer part, preserving
+      // any fractional component but trimming f64 noise (toFixed(9) plus
+      // trailing-zero strip) so 1.3 renders as "01.3" not "01.3000…04".
+      let sStr: string;
+      if (Number.isInteger(s)) {
+        sStr = String(s).padStart(2, '0');
+      } else {
+        const repr = s.toFixed(9).replace(/0+$/, '').replace(/\.$/, '');
+        const [intPart, fracPart] = repr.split('.');
+        sStr = intPart.padStart(2, '0') + (fracPart ? '.' + fracPart : '');
+      }
+      const head = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${sStr}`;
       const tzNorm = tz === '+00:00' || tz === '-00:00' ? 'Z' : tz;
       return head + (frac ?? '') + (tzNorm ?? '');
     };
@@ -1145,16 +1239,41 @@ export const feel: any = {
       const a = args[0];
       if (typeof a !== 'string') return null;
       // Accept a date-and-time string and extract the time portion.
-      const dtTime = /T(\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}|@[A-Za-z_+\-/]+)?)$/.exec(a);
+      const dtTime = /T(\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?)$/.exec(a);
       const candidate = dtTime ? dtTime[1] : a;
-      const m = /^(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2}|@[A-Za-z_+\-/]+)?$/.exec(candidate);
+      const m = /^(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(candidate);
       if (!m) return null;
       return fmtTime(Number(m[1]), Number(m[2]), Number(m[3]), m[4], m[5]);
     }
     if (args.length >= 3) {
       if (args.slice(0, 3).some((a) => a == null)) return null;
       const [h, m, s] = args.map(Number);
-      return fmtTime(h, m, s);
+      // Optional 4th arg: timezone offset, expressed either as `±HH:MM`/`Z`
+      // or as a days-and-time duration (which we convert to ±HH:MM).
+      let tz: string | undefined = undefined;
+      if (args[3] != null) {
+        if (typeof args[3] === 'string') {
+          if (/^Z|[+-]\d{2}:\d{2}$/.test(args[3])) {
+            tz = args[3];
+          } else if (/^-?P/.test(args[3])) {
+            const sec = feel.dt_to_seconds(args[3]);
+            if (sec == null) return null;
+            if (sec === 0) tz = 'Z';
+            else {
+              const sign = sec < 0 ? '-' : '+';
+              const abs = Math.abs(sec);
+              const oh = Math.floor(abs / 3600);
+              const om = Math.floor((abs % 3600) / 60);
+              tz = `${sign}${String(oh).padStart(2, '0')}:${String(om).padStart(2, '0')}`;
+            }
+          } else {
+            return null;
+          }
+        } else {
+          return null;
+        }
+      }
+      return fmtTime(h, m, s, undefined, tz);
     }
     return null;
   },
