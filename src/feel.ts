@@ -40,6 +40,13 @@ export type FeelNode =
   | { type: 'in'; value: FeelNode; list: FeelNode }
   | { type: 'instanceof'; value: FeelNode; typeName: string }
   | { type: 'temporal'; value: string }
+  | {
+      type: 'unaryTests';
+      tests: Array<
+        | { kind: 'cmp'; op: string; rhs: FeelNode }
+        | { kind: 'expr'; expr: FeelNode }
+      >;
+    }
   | { type: 'lambda'; params: string[]; body: FeelNode }
   | {
       type: 'range';
@@ -148,6 +155,7 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   'month of year': ['date'],
   'week of year': ['date'],
   'list replace': ['list', 'position', 'newItem'],
+  is: ['value1', 'value2'],
 };
 
 // Builtin FEEL function names (multi-word ones must be in the names list so the
@@ -217,6 +225,7 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'month of year': 'month_of_year',
   'week of year': 'week_of_year',
   'list replace': 'list_replace',
+  is: 'is_fn',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
@@ -384,6 +393,10 @@ function tokenize(input: string, knownNames: string[]): Token[] {
 
 class Parser {
   private pos = 0;
+  // Counter: when > 0 we're inside a bracketed range/list/test group. While
+  // set, postfix `[` is not consumed as an index, so an outer alt-range closer
+  // like `[1..10[` works.
+  private inBracket = 0;
   constructor(private readonly tokens: Token[]) {}
 
   parse(): FeelNode {
@@ -434,6 +447,37 @@ class Parser {
       return { type: 'quant', kind, bindings, body };
     }
     return this.parseOr();
+  }
+
+  // Parses one item inside a `(...)` group: either a positive unary test
+  // (e.g. `< X`, `>= Y`) or a regular expression (which may itself be a range
+  // when followed by `..`).
+  private parseTestItem():
+    | { kind: 'cmp'; op: string; rhs: FeelNode }
+    | { kind: 'expr'; expr: FeelNode } {
+    const t = this.peek();
+    if (
+      t?.kind === 'op' &&
+      ['<=', '>=', '<', '>', '=', '!='].includes(t.op)
+    ) {
+      const op = (this.next() as { kind: 'op'; op: string }).op;
+      const rhs = this.parseAdd();
+      return { kind: 'cmp', op, rhs };
+    }
+    return { kind: 'expr', expr: this.parseExpression() };
+  }
+
+  private skipTypeArgs(): void {
+    if (!this.isOp('<')) return;
+    this.next();
+    let depth = 1;
+    while (depth > 0 && this.peek()) {
+      const t = this.next();
+      if (t.kind === 'op') {
+        if (t.op === '<') depth++;
+        else if (t.op === '>') depth--;
+      }
+    }
   }
 
   private parseLambdaParam(): string {
@@ -513,11 +557,11 @@ class Parser {
     }
     if (this.isKw('in')) {
       this.next();
-      // FEEL `in` may be followed by a positive unary test:
-      // `x in <= 10` ↔ `x <= 10`, similarly for <, >, >=, =. Otherwise it's
-      // list/range membership.
       const t = this.peek();
-      if (t?.kind === 'op' && ['<=', '>=', '<', '>', '='].includes(t.op)) {
+      if (
+        t?.kind === 'op' &&
+        ['<=', '>=', '<', '>', '=', '!='].includes(t.op)
+      ) {
         const op = (this.next() as { kind: 'op'; op: string }).op;
         const right = this.parseAdd();
         return { type: 'binop', op, left, right };
@@ -529,7 +573,6 @@ class Parser {
       this.next();
       if (!this.isKw('of')) throw new Error('feel parse: expected of');
       this.next();
-      // Type name may be multi-word (e.g. `date and time`).
       const first = this.next();
       const parts: string[] = [
         first.kind === 'ident'
@@ -541,6 +584,17 @@ class Parser {
       while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
         const t = this.next();
         parts.push(t.kind === 'ident' ? t.name : t.kind === 'kw' ? t.name : '');
+      }
+      // Skip generic params `<…>` and optional `-> type` for function/range/list.
+      this.skipTypeArgs();
+      while (this.isOp('-') && this.peek(1)?.kind === 'op' && (this.peek(1) as any).op === '>') {
+        this.next();
+        this.next();
+        // Return type: ident (possibly multi-word) followed by optional <…>.
+        while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
+          this.next();
+        }
+        this.skipTypeArgs();
       }
       return {
         type: 'instanceof',
@@ -605,7 +659,11 @@ class Parser {
   }
   private parsePostfix(): FeelNode {
     let expr = this.parsePrimary();
-    while (this.isPunct('.') || this.isPunct('(') || this.isPunct('[')) {
+    while (
+      this.isPunct('.') ||
+      this.isPunct('(') ||
+      (this.isPunct('[') && this.inBracket === 0)
+    ) {
       if (this.isPunct('.')) {
         this.next();
         // FEEL field names can be multi-word (e.g. `time offset`). Allow the
@@ -724,38 +782,86 @@ class Parser {
       this.next();
       return { type: 'ident', name: t.name };
     }
+    // Alternative range syntax: `]X..Y]` (≡ `(X..Y]`), `]X..Y[` (≡ `(X..Y)`).
+    if (t.kind === 'punct' && t.ch === ']') {
+      this.next();
+      this.inBracket++;
+      const inner = this.parseAdd();
+      // parseAdd handles `..` itself, so `inner` is normally already a range.
+      let lo: FeelNode;
+      let hi: FeelNode;
+      if (inner.type === 'range') {
+        lo = inner.lo;
+        hi = inner.hi;
+      } else {
+        if (!this.isOp('..')) throw new Error('feel parse: expected ..');
+        this.next();
+        lo = inner;
+        hi = this.parseAdd();
+      }
+      const closeT = this.peek();
+      if (
+        !(closeT?.kind === 'punct' &&
+          (closeT.ch === ')' || closeT.ch === ']' || closeT.ch === '['))
+      ) {
+        throw new Error('feel parse: expected ) or ] or [');
+      }
+      const closer = closeT.ch;
+      this.next();
+      this.inBracket--;
+      return {
+        type: 'range',
+        lo,
+        hi,
+        openLow: true,
+        openHigh: closer === ')' || closer === '[',
+      };
+    }
     if (t.kind === 'punct' && t.ch === '(') {
       this.next();
-      // Positive unary test as expression: `(> X)`, `(<= X)`, etc.
-      const lookOp = this.peek();
-      if (
-        lookOp?.kind === 'op' &&
-        ['<=', '>=', '<', '>', '='].includes(lookOp.op)
-      ) {
-        const op = (this.next() as { kind: 'op'; op: string }).op;
-        const operand = this.parseExpression();
-        if (!this.isPunct(')')) throw new Error('feel parse: expected )');
+      this.inBracket++;
+      const items = [this.parseTestItem()];
+      while (this.isPunct(',')) {
         this.next();
+        items.push(this.parseTestItem());
+      }
+      const closeT = this.peek();
+      if (
+        !(closeT?.kind === 'punct' &&
+          (closeT.ch === ')' || closeT.ch === ']' || closeT.ch === '['))
+      ) {
+        throw new Error('feel parse: expected ) or ] or [');
+      }
+      const closer = closeT.ch;
+      this.next();
+      this.inBracket--;
+      if (items.length > 1) {
+        return { type: 'unaryTests', tests: items };
+      }
+      const only = items[0];
+      if (only.kind === 'cmp') {
+        const op = only.op;
+        const rhs = only.rhs;
+        if (op === '!=') {
+          return { type: 'unaryTests', tests: [only] };
+        }
         const nullNode: FeelNode = { type: 'null' };
         if (op === '>')
-          return { type: 'range', lo: operand, hi: nullNode, openLow: true, openHigh: true };
+          return { type: 'range', lo: rhs, hi: nullNode, openLow: true, openHigh: true };
         if (op === '>=')
-          return { type: 'range', lo: operand, hi: nullNode, openLow: false, openHigh: true };
+          return { type: 'range', lo: rhs, hi: nullNode, openLow: false, openHigh: true };
         if (op === '<')
-          return { type: 'range', lo: nullNode, hi: operand, openLow: true, openHigh: true };
+          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: true };
         if (op === '<=')
-          return { type: 'range', lo: nullNode, hi: operand, openLow: true, openHigh: false };
-        // = X → singleton range
-        return { type: 'range', lo: operand, hi: operand, openLow: false, openHigh: false };
+          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: false };
+        return { type: 'range', lo: rhs, hi: rhs, openLow: false, openHigh: false };
       }
-      const inner = this.parseExpression();
-      // Bracketed range: `(2..4)` or `(2..4]`. Outer `(` means openLow=true.
+      // Plain expression
+      const inner = only.expr;
       if (
         inner.type === 'range' &&
-        (this.isPunct(')') || this.isPunct(']'))
+        (closer === ')' || closer === ']')
       ) {
-        const closer = (this.peek() as { kind: 'punct'; ch: string }).ch;
-        this.next();
         return {
           type: 'range',
           lo: inner.lo,
@@ -764,30 +870,32 @@ class Parser {
           openHigh: closer === ')',
         };
       }
-      if (!this.isPunct(')')) throw new Error('feel parse: expected )');
-      this.next();
+      if (closer !== ')') throw new Error('feel parse: expected )');
       return { type: 'paren', expr: inner };
     }
     if (t.kind === 'punct' && t.ch === '[') {
       this.next();
+      this.inBracket++;
       if (this.isPunct(']')) {
         this.next();
+        this.inBracket--;
         return { type: 'list', items: [] };
       }
       const first = this.parseExpression();
-      // Bracketed range: `[2..4]` or `[2..4)`. Outer `[` means openLow=false.
+      // Bracketed range: `[2..4]`, `[2..4)`, `[2..4[`. Outer `[` means openLow=false.
       if (
         first.type === 'range' &&
-        (this.isPunct(')') || this.isPunct(']'))
+        (this.isPunct(')') || this.isPunct(']') || this.isPunct('['))
       ) {
         const closer = (this.peek() as { kind: 'punct'; ch: string }).ch;
         this.next();
+        this.inBracket--;
         return {
           type: 'range',
           lo: first.lo,
           hi: first.hi,
           openLow: false,
-          openHigh: closer === ')',
+          openHigh: closer === ')' || closer === '[',
         };
       }
       const items: FeelNode[] = [first];
@@ -797,6 +905,7 @@ class Parser {
       }
       if (!this.isPunct(']')) throw new Error('feel parse: expected ]');
       this.next();
+      this.inBracket--;
       return { type: 'list', items };
     }
     if (t.kind === 'punct' && t.ch === '{') {
@@ -952,6 +1061,24 @@ export function emitFeelNode(
       return `feel.list_contains(${emitFeelNode(node.list, ctx)}, ${emitFeelNode(node.value, ctx)})`;
     case 'instanceof':
       return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)})`;
+    case 'unaryTests': {
+      const fns = node.tests.map((t) => {
+        if (t.kind === 'cmp') {
+          const opMap: Record<string, string> = {
+            '<': 'lt',
+            '<=': 'le',
+            '>': 'gt',
+            '>=': 'ge',
+            '=': 'eq',
+            '!=': 'neq',
+          };
+          const fn = opMap[t.op];
+          return `(__item: any) => feel.${fn}(__item, ${emitFeelNode(t.rhs, ctx)}) === true`;
+        }
+        return `(__item: any) => feel.eq(__item, ${emitFeelNode(t.expr, ctx)}) === true`;
+      });
+      return `{ __feel: 'tests', tests: [${fns.join(', ')}] }`;
+    }
     case 'temporal': {
       const v = node.value;
       const lit = JSON.stringify(v);
@@ -1171,7 +1298,9 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (dtMatch) {
       const baseSec = feel.dt_to_seconds(dur);
       if (baseSec != null) {
-        const ms = Date.parse(d);
+        // Force UTC for naive date-and-time strings (no timezone suffix).
+        const dForParse = /Z|[+-]\\d{2}:\\d{2}$/.test(d) ? d : d + 'Z';
+        const ms = Date.parse(dForParse);
         if (!Number.isNaN(ms)) {
           const out = new Date(ms + baseSec * 1000);
           const iso = out.toISOString().slice(0, 19);
@@ -1180,7 +1309,8 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       }
       const months = feel.ym_to_months(dur);
       if (months != null) {
-        const ms = Date.parse(d);
+        const dForParse = /Z|[+-]\\d{2}:\\d{2}$/.test(d) ? d : d + 'Z';
+        const ms = Date.parse(dForParse);
         if (!Number.isNaN(ms)) {
           const out = new Date(ms);
           out.setUTCMonth(out.getUTCMonth() + months);
@@ -1200,8 +1330,10 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       const tB = Date.UTC(Number(dateB[1]), Number(dateB[2]) - 1, Number(dateB[3]));
       return feel.dt_format((tA - tB) / 1000);
     }
-    const tA = Date.parse(a);
-    const tB = Date.parse(b);
+    const aForParse = /Z|[+-]\\d{2}:\\d{2}$/.test(a) ? a : a + 'Z';
+    const bForParse = /Z|[+-]\\d{2}:\\d{2}$/.test(b) ? b : b + 'Z';
+    const tA = Date.parse(aForParse);
+    const tB = Date.parse(bForParse);
     if (!Number.isNaN(tA) && !Number.isNaN(tB)) {
       return feel.dt_format((tA - tB) / 1000);
     }
@@ -1447,9 +1579,25 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       const upper = hi == null ? true : openHigh ? feel.lt(item, hi) : feel.le(item, hi);
       return lower === true && upper === true;
     }
+    if (list && typeof list === 'object' && list.__feel === 'tests') {
+      // Positive unary tests — match if any test passes. Tests may themselves
+      // reference ranges/lists; predicate already returns true/false.
+      return list.tests.some((fn: any) => fn(item) === true);
+    }
     list = feel.asList(list) as any;
     if (!Array.isArray(list)) return null;
-    for (const x of list) if (feel.eq(x, item) === true) return true;
+    for (const x of list) {
+      // Recurse into nested ranges/lists/tests for in-membership semantics.
+      if (x && typeof x === 'object' && (x.__feel === 'range' || x.__feel === 'tests')) {
+        if (feel.list_contains(x, item) === true) return true;
+        continue;
+      }
+      if (Array.isArray(x)) {
+        if (feel.list_contains(x, item) === true) return true;
+        continue;
+      }
+      if (feel.eq(x, item) === true) return true;
+    }
     return false;
   },
   distinct_values(list: any): any {
@@ -1841,6 +1989,14 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   },
   is_defined(v: any): any {
     return v !== undefined;
+  },
+  // FEEL is(a,b) — strict same-value-and-type test.
+  is_fn(a: any, b: any): any {
+    if (a === null && b === null) return true;
+    if (a === null || b === null) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a === 'number') return a === b;
+    return feel.eq(a, b);
   },
   instance_of(v: any, typeName: string): any {
     if (v == null) return false;
