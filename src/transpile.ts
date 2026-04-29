@@ -184,6 +184,55 @@ function functionDefToFeelText(fd: any): string {
   return `function(${fdParams.join(', ')}) ${body}`;
 }
 
+// Extract the FEEL-text body of a boxed sub-expression element. The DMN
+// schema uses literalExpression most often, but the same slot can carry
+// any expression form — we recurse into those by re-using the relevant
+// translators.
+function boxedExprText(node: any): string {
+  if (!node) return 'null';
+  if (node.literalExpression?.text != null) return String(node.literalExpression.text);
+  if (node.functionDefinition) return functionDefToFeelText(node.functionDefinition);
+  if (node.some) return quantifiedToFeelText(node.some, 'some');
+  if (node.every) return quantifiedToFeelText(node.every, 'every');
+  if (node.for) return forBoxedToFeelText(node.for);
+  if (node.filter) return filterBoxedToFeelText(node.filter);
+  if (node.conditional) return conditionalBoxedToFeelText(node.conditional);
+  if (node.list) {
+    const items = arr<any>(node.list.literalExpression).map((le) =>
+      String(le?.text ?? 'null'),
+    );
+    return `[${items.join(', ')}]`;
+  }
+  return 'null';
+}
+
+function quantifiedToFeelText(node: any, kw: 'some' | 'every'): string {
+  const v = node['@_iteratorVariable'] ?? 'item';
+  const inExpr = boxedExprText(node.in);
+  const sat = boxedExprText(node.satisfies);
+  return `${kw} ${v} in (${inExpr}) satisfies (${sat})`;
+}
+
+function forBoxedToFeelText(node: any): string {
+  const v = node['@_iteratorVariable'] ?? 'item';
+  const inExpr = boxedExprText(node.in);
+  const ret = boxedExprText(node.return);
+  return `for ${v} in (${inExpr}) return (${ret})`;
+}
+
+function filterBoxedToFeelText(node: any): string {
+  const inExpr = boxedExprText(node.in);
+  const match = boxedExprText(node.match);
+  return `(${inExpr})[${match}]`;
+}
+
+function conditionalBoxedToFeelText(node: any): string {
+  const cond = boxedExprText(node.if);
+  const thenE = boxedExprText(node.then);
+  const elseE = boxedExprText(node.else);
+  return `if (${cond}) then (${thenE}) else (${elseE})`;
+}
+
 export function parseDmn(xml: string): DmnModel {
   const parsed = xmlParser.parse(xml);
   const defs = parsed.definitions;
@@ -263,6 +312,21 @@ export function parseDmn(xml: string): DmnModel {
     // Boxed `<functionDefinition>` decision body — the decision IS a lambda.
     if (!literalExpressionText && n.functionDefinition) {
       literalExpressionText = functionDefToFeelText(n.functionDefinition);
+    }
+    // Boxed quantified expressions `<some>` / `<every>` (DMN 1.4+).
+    if (!literalExpressionText && (n.some || n.every)) {
+      literalExpressionText = quantifiedToFeelText(n.some ?? n.every, n.some ? 'some' : 'every');
+    }
+    // Boxed `<for>` and `<filter>` follow the same shape and translate to
+    // their FEEL textual forms.
+    if (!literalExpressionText && n.for) {
+      literalExpressionText = forBoxedToFeelText(n.for);
+    }
+    if (!literalExpressionText && n.filter) {
+      literalExpressionText = filterBoxedToFeelText(n.filter);
+    }
+    if (!literalExpressionText && n.conditional) {
+      literalExpressionText = conditionalBoxedToFeelText(n.conditional);
     }
 
     const decisionTable = n.decisionTable

@@ -1260,9 +1260,24 @@ export function emitFeelNode(
       return inner;
     }
     case 'quant': {
+      // FEEL `some`/`every`: a non-boolean satisfies result poisons the
+      // whole expression to null. Iterate manually so we can short-circuit
+      // and detect that case (vs. JS's `Array.prototype.some` coercion).
       const b = node.bindings[0];
-      const method = node.kind === 'every' ? 'every' : 'some';
-      return `feel.iterate(${emitFeelNode(b.range, ctx)}).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body, ctx)} === true)`;
+      const isEvery = node.kind === 'every';
+      const seed = isEvery ? 'true' : 'false';
+      const winValue = isEvery ? 'false' : 'true';
+      return `(() => {
+        const __it: any = feel.iterateOrNull(${emitFeelNode(b.range, ctx)});
+        if (__it === null) return null;
+        let __r: any = ${seed};
+        for (const ${toJsIdent(b.name)} of __it) {
+          const __v: any = ${emitFeelNode(node.body, ctx)};
+          if (typeof __v !== 'boolean') return null;
+          if (__v === ${winValue}) __r = ${winValue};
+        }
+        return __r;
+      })()`;
     }
     case 'between':
       return `feel.and(feel.le(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.value, ctx)}), feel.le(${emitFeelNode(node.value, ctx)}, ${emitFeelNode(node.hi, ctx)}))`;
