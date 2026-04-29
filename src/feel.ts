@@ -1220,12 +1220,15 @@ function emitIdent(name: string, ctx?: CompileContext): string {
   // Inside a filter predicate: prefer a property of the iterated item over
   // any same-named outer binding (so `[{a:1}][a > 0]` reads each item's `a`
   // and `[{item:1}][item > 0]` reads each item's `item` rather than the
-  // whole iteration variable). Fall back to the JS-scope variable only
-  // when the item has no such property.
+  // whole iteration variable). Fall back to the JS-scope variable, then
+  // to a same-named FEEL builtin, then to null.
   if (ctx?.inFilterScope) {
     const key = JSON.stringify(name);
     const ident = toJsIdent(name);
-    return `((item != null && typeof item === 'object' && ${key} in (item as any)) ? feel.prop(item, ${key}) : (typeof ${ident} !== 'undefined' ? ${ident} : null))`;
+    const builtinFallback = FEEL_BUILTINS[name]
+      ? `feel.${FEEL_BUILTINS[name]}`
+      : 'null';
+    return `((item != null && typeof item === 'object' && ${key} in (item as any)) ? feel.prop(item, ${key}) : (typeof ${ident} !== 'undefined' ? ${ident} : ${builtinFallback}))`;
   }
   // A name that's in scope wins over a same-named builtin — `product`,
   // `count`, `number` are common parameter names that also name builtins.

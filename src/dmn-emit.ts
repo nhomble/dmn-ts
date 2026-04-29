@@ -798,6 +798,12 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
       }
     }
   }
+  // DMN 1.3+ short-circuits the whole service to null when an input
+  // doesn't conform to its declared type ("the service is never
+  // invoked"); 1.1 / 1.2 coerce the offending input to null and still
+  // run the service (DMN13-???).
+  const shortCircuitOnTypeFail =
+    model.dmnVersion !== '1.1' && model.dmnVersion !== '1.2';
   const inputCoercions = inputNames
     .filter((n) => {
       const t = inputTypes.get(n);
@@ -808,11 +814,16 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
     .map((n) => {
       const ident = toJsIdent(n);
       const t = inputTypes.get(n)!;
-      // FEEL spec: a value that doesn't conform to the declared type is
-      // silently coerced to null at the boundary. The singleton-list rule
-      // also applies — a one-element list flowing into a scalar slot
-      // unwraps to the element first.
-      return `${ident} = ${ident} === null || ${ident} === undefined ? ${ident} : feel.validate(feel.singleton(${ident}), ${JSON.stringify(t)}, __itemDefs);`;
+      const validated = `feel.validate(feel.singleton(${ident}), ${JSON.stringify(t)}, __itemDefs)`;
+      if (shortCircuitOnTypeFail) {
+        // Always assign the singleton-unwrapped/validated value back; if
+        // it ended up null and the original wasn't, that's the type-fail
+        // signal to short-circuit the whole service.
+        return `if (${ident} !== null && ${ident} !== undefined) { const __t: any = ${validated}; if (__t === null) return null; ${ident} = __t; }`;
+      }
+      // The singleton-list rule applies — a one-element list flowing into
+      // a scalar slot unwraps to the element before validation.
+      return `${ident} = ${ident} === null || ${ident} === undefined ? ${ident} : ${validated};`;
     });
   const ctxParts = inputNames
     .map((n) => `${JSON.stringify(n)}: ${toJsIdent(n)}`)
