@@ -1151,6 +1151,19 @@ export const feel: any = {
     return v !== undefined;
   },
   // FEEL range(s) — string-form range constructor (DMN 1.5).
+  // FEEL context(entries) — list of {key, value} objects → context value.
+  context_fn(entries: any): any {
+    if (!Array.isArray(entries)) return null;
+    const out: Record<string, unknown> = {};
+    for (const e of entries) {
+      if (!e || typeof e !== 'object' || typeof (e as any).key !== 'string')
+        return null;
+      const k = (e as any).key;
+      if (Object.prototype.hasOwnProperty.call(out, k)) return null;
+      out[k] = (e as any).value;
+    }
+    return out;
+  },
   range_fn(s: any): any {
     if (typeof s !== 'string') return null;
     const trimmed = s.trim();
@@ -1166,17 +1179,18 @@ export const feel: any = {
         try {
           return JSON.parse(t);
         } catch {
-          return null;
+          return undefined;
         }
       }
       if (t.startsWith('@"') && t.endsWith('"')) {
         return t.slice(2, -1);
       }
-      return null;
+      return undefined; // parse failed (e.g. nested function call we can't eval)
     };
     const lo = parse(m[2]);
     const hi = parse(m[3]);
     if (lo === undefined || hi === undefined) return null;
+    if (lo === null && hi === null) return null;
     return {
       __feel: 'range',
       lo,

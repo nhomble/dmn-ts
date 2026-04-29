@@ -169,6 +169,7 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   'round down': ['n', 'scale'],
   'round half up': ['n', 'scale'],
   'round half down': ['n', 'scale'],
+  context: ['entries'],
 };
 
 // Builtin FEEL function names (multi-word ones must be in the names list so the
@@ -244,6 +245,7 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'round down': 'round_down',
   'round half up': 'round_half_up',
   'round half down': 'round_half_down',
+  context: 'context_fn',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
