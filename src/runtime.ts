@@ -198,27 +198,19 @@ export const feel: any = {
     // Date-and-time: extract date + time, manipulate, recombine.
     const dtMatch = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(d);
     if (dtMatch) {
-      // Preserve the source timezone suffix; if naive, treat as UTC and emit naive.
       const tzSuffix = dtMatch[3] ?? '';
-      // Date.parse can't handle @IANA suffixes; treat them as naive UTC.
-      const dForParse = tzSuffix.startsWith('@')
-        ? d.slice(0, d.length - tzSuffix.length) + 'Z'
-        : tzSuffix
-          ? d
-          : d + 'Z';
       const baseSec = feel.dt_to_seconds(dur);
       if (baseSec != null) {
-        const ms = Date.parse(dForParse);
-        if (!Number.isNaN(ms)) {
+        // Build a UTC ms timestamp for the input. Manual construction handles
+        // negative years and IANA suffixes (which Date.parse rejects).
+        const ms = feel._dt_to_utc_ms(dtMatch[1], dtMatch[2], tzSuffix);
+        if (ms != null) {
           const out = new Date(ms + baseSec * 1000);
-          // Format in the original offset.
           return feel._format_dt_with_tz(out, tzSuffix);
         }
       }
       const months = feel.ym_to_months(dur);
       if (months != null) {
-        // Calendar math: add months on the local date component, keep time
-        // and tz untouched. Avoids the UTC-rollover bug across DST/offset.
         const dateOnly = dtMatch[1];
         const timeOnly = dtMatch[2];
         const newDate = feel.add_date_duration(dateOnly, dur);
@@ -226,6 +218,37 @@ export const feel: any = {
       }
     }
     return null;
+  },
+  // Parse a `YYYY-MM-DD` date and `HH:MM:SS(.fff)?` time + optional tz into a
+  // UTC ms timestamp. Returns null on parse failure.
+  _dt_to_utc_ms(dateStr: any, timeStr: any, tzSuffix: any): any {
+    if (typeof dateStr !== 'string' || typeof timeStr !== 'string') return null;
+    const dm = /^(-?)(\d+)-(\d{2})-(\d{2})$/.exec(dateStr);
+    if (!dm) return null;
+    const sign = dm[1] === '-' ? -1 : 1;
+    const y = sign * Number(dm[2]);
+    const mo = Number(dm[3]) - 1;
+    const da = Number(dm[4]);
+    const tm = /^(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?$/.exec(timeStr);
+    if (!tm) return null;
+    const h = Number(tm[1]);
+    const mi = Number(tm[2]);
+    const sec = Number(tm[3]);
+    const fracMs = tm[4] ? Number('0.' + tm[4]) * 1000 : 0;
+    // setUTCFullYear handles negative / extended years that Date.UTC doesn't.
+    const dt = new Date(0);
+    dt.setUTCFullYear(y, mo, da);
+    dt.setUTCHours(h, mi, sec, Math.round(fracMs));
+    let ms = dt.getTime();
+    if (tzSuffix && tzSuffix !== 'Z' && !tzSuffix.startsWith('@')) {
+      const m = /^([+-])(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(tzSuffix);
+      if (m) {
+        const sgn = m[1] === '-' ? -1 : 1;
+        const offSec = sgn * (Number(m[2]) * 3600 + Number(m[3]) * 60 + Number(m[4] || 0));
+        ms -= offSec * 1000;
+      }
+    }
+    return ms;
   },
   // Format a UTC `Date` in the requested offset (e.g. "+11:00", "Z", or "" for
   // naive output without any suffix).
@@ -240,12 +263,14 @@ export const feel: any = {
     }
     const shifted = new Date(dt.getTime() + offsetMin * 60_000);
     const y = shifted.getUTCFullYear();
+    const sign = y < 0 ? '-' : '';
+    const yStr = String(Math.abs(y)).padStart(4, '0');
     const mo = String(shifted.getUTCMonth() + 1).padStart(2, '0');
     const d = String(shifted.getUTCDate()).padStart(2, '0');
     const h = String(shifted.getUTCHours()).padStart(2, '0');
     const mi = String(shifted.getUTCMinutes()).padStart(2, '0');
     const s = String(shifted.getUTCSeconds()).padStart(2, '0');
-    return `${y}-${mo}-${d}T${h}:${mi}:${s}${tzSuffix}`;
+    return `${sign}${yStr}-${mo}-${d}T${h}:${mi}:${s}${tzSuffix}`;
   },
   diff_dates(a: any, b: any): any {
     if (typeof a !== 'string' || typeof b !== 'string') return null;

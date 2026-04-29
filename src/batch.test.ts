@@ -237,7 +237,7 @@ async function main(): Promise<void> {
           loadError: r.loadError,
           failures: r.results
             .filter((x) => x.status === 'fail')
-            .slice(0, 5)
+            .slice(0, 200)
             .map((x) => ({
               tc: `${x.testFile}#${x.testCaseId}/${x.resultName}`,
               reason: x.reason,
