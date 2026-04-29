@@ -165,6 +165,10 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   'list replace': ['list', 'position', 'newItem'],
   is: ['value1', 'value2'],
   range: ['from'],
+  'round up': ['n', 'scale'],
+  'round down': ['n', 'scale'],
+  'round half up': ['n', 'scale'],
+  'round half down': ['n', 'scale'],
 };
 
 // Builtin FEEL function names (multi-word ones must be in the names list so the
@@ -236,6 +240,10 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'list replace': 'list_replace',
   is: 'is_fn',
   range: 'range_fn',
+  'round up': 'round_up',
+  'round down': 'round_down',
+  'round half up': 'round_half_up',
+  'round half down': 'round_half_down',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must

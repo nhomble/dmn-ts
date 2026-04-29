@@ -1070,6 +1070,36 @@ export const feel: any = {
     if (typeof n !== 'number' || !Number.isFinite(n)) return null;
     return Math.abs(Math.trunc(n)) % 2 === 0;
   },
+  // FEEL DMN 1.4+ rounding functions. Each scales by 10^scale, applies the
+  // requested rounding mode, then scales back.
+  round_up(n: any, scale: any): any {
+    if (typeof n !== 'number' || typeof scale !== 'number') return null;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+    const f = Math.pow(10, Math.trunc(scale));
+    const x = n * f;
+    return (x >= 0 ? Math.ceil(x) : Math.floor(x)) / f;
+  },
+  round_down(n: any, scale: any): any {
+    if (typeof n !== 'number' || typeof scale !== 'number') return null;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+    const f = Math.pow(10, Math.trunc(scale));
+    const x = n * f;
+    return (x >= 0 ? Math.floor(x) : Math.ceil(x)) / f;
+  },
+  round_half_up(n: any, scale: any): any {
+    if (typeof n !== 'number' || typeof scale !== 'number') return null;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+    const f = Math.pow(10, Math.trunc(scale));
+    const x = n * f;
+    return (x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5)) / f;
+  },
+  round_half_down(n: any, scale: any): any {
+    if (typeof n !== 'number' || typeof scale !== 'number') return null;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+    const f = Math.pow(10, Math.trunc(scale));
+    const x = n * f;
+    return (x >= 0 ? Math.ceil(x - 0.5) : -Math.ceil(-x - 0.5)) / f;
+  },
   decimal(n: any, scale: any): any {
     if (n == null || scale == null) return null;
     if (typeof n !== 'number' || typeof scale !== 'number') return null;
