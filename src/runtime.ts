@@ -1452,13 +1452,21 @@ export const feel: any = {
       return null;
     }
   },
-  replace(s: any, pat: any, rep: any, flags?: any): any {
+  replace(s: any, pat: any, rep: any, flags?: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof s !== 'string' || typeof pat !== 'string' || typeof rep !== 'string') return null;
+    if (flags !== undefined && flags !== null && typeof flags !== 'string') return null;
     const f = typeof flags === 'string' ? flags : '';
-    const jsFlags = (feel._xpath_flags(f) ?? '') + 'g';
+    const jsFlagsBase = feel._xpath_flags(f);
+    if (jsFlagsBase === null) return null;
+    const jsFlags = jsFlagsBase + 'g';
     const patStr = feel._xpath_pattern(pat, f);
+    // XPath replacement: `$0` is the full match; JS uses `$&`. Other
+    // capture refs ($1..$9) and literal `$` ($$ in JS) are compatible
+    // with XPath syntax, so we leave them as-is.
+    const jsRep = rep.replace(/\$0/g, '$&');
     try {
-      return s.replace(new RegExp(patStr, jsFlags), rep);
+      return s.replace(new RegExp(patStr, jsFlags), jsRep);
     } catch {
       return null;
     }
@@ -2082,10 +2090,9 @@ export const feel: any = {
     if (typeof s !== 'string') return null;
     const m = /^(-)?P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.(\d*))?S)?)?$/.exec(s);
     if (!m) return null;
-    // Reject empty body (`P` alone)
+    // `P` alone (and `P` followed only by an empty `T`) isn't a valid duration.
     if (!m[2] && !m[3] && !m[4] && !m[5] && !m[6] && !m[7]) {
-      // Allow strings that explicitly pass through the T marker only if a 0-second is emitted
-      // Otherwise normalize to PT0S for inputs like "P0D".
+      return null;
     }
     const sign = m[1] || '';
     let y = Number(m[2] || '0');
