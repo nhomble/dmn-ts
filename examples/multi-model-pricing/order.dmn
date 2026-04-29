@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions
+    xmlns="https://www.omg.org/spec/DMN/20211108/MODEL/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    namespace="https://example.com/dmn/order"
+    name="order"
+    id="order">
+
+    <import
+        namespace="https://example.com/dmn/pricing"
+        name="pricing"
+        importType="https://www.omg.org/spec/DMN/20211108/MODEL/"/>
+
+    <inputData name="Tier" id="i_Tier">
+        <variable name="Tier" typeRef="pricing.Tier"/>
+    </inputData>
+
+    <inputData name="Base Price" id="i_BasePrice">
+        <variable name="Base Price" typeRef="number"/>
+    </inputData>
+
+    <decision name="Total Price" id="d_TotalPrice">
+        <variable name="Total Price" typeRef="number"/>
+        <informationRequirement>
+            <requiredInput href="#i_Tier"/>
+        </informationRequirement>
+        <informationRequirement>
+            <requiredInput href="#i_BasePrice"/>
+        </informationRequirement>
+        <literalExpression>
+            <text>Base Price * pricing.multiplier(Tier)</text>
+        </literalExpression>
+    </decision>
+</definitions>

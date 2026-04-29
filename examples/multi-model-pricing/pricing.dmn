@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions
+    xmlns="https://www.omg.org/spec/DMN/20211108/MODEL/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    namespace="https://example.com/dmn/pricing"
+    name="pricing"
+    id="pricing">
+
+    <itemDefinition name="Tier" id="t_Tier">
+        <typeRef>string</typeRef>
+        <allowedValues>
+            <text>"basic", "pro", "enterprise"</text>
+        </allowedValues>
+    </itemDefinition>
+
+    <businessKnowledgeModel name="multiplier" id="b_multiplier">
+        <encapsulatedLogic>
+            <formalParameter name="tier" typeRef="Tier"/>
+            <decisionTable hitPolicy="UNIQUE">
+                <input>
+                    <inputExpression typeRef="string"><text>tier</text></inputExpression>
+                </input>
+                <output typeRef="number"/>
+                <rule>
+                    <inputEntry><text>"basic"</text></inputEntry>
+                    <outputEntry><text>1</text></outputEntry>
+                </rule>
+                <rule>
+                    <inputEntry><text>"pro"</text></inputEntry>
+                    <outputEntry><text>2.5</text></outputEntry>
+                </rule>
+                <rule>
+                    <inputEntry><text>"enterprise"</text></inputEntry>
+                    <outputEntry><text>5</text></outputEntry>
+                </rule>
+            </decisionTable>
+        </encapsulatedLogic>
+        <variable name="multiplier" typeRef="number"/>
+    </businessKnowledgeModel>
+</definitions>

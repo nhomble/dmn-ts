@@ -11,8 +11,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { emitTs, parseDmn } from './transpile.js';
-import { mergeImport } from './dmn-parse.js';
+import { emitTs, loadDmnTree } from './transpile.js';
 import { getRuntimeSource } from './feel.js';
 import {
   type CaseModule,
@@ -130,58 +129,15 @@ async function main(): Promise<void> {
       continue;
     }
     try {
-      const xml = readFileSync(dmnPath, 'utf8');
-      // Pre-parse all sibling .dmn files first so we can build an
-      // (namespace → idMap) registry. The host model needs that
-      // registry during its own parse so cross-namespace hrefs
-      // (`<requiredDecision href="http://…#_id">`) resolve to the
-      // imported decision's name rather than its raw UUID.
-      const siblings = readdirSync(rec.caseDir).filter(
-        (f) => f.endsWith('.dmn') && join(rec.caseDir, f) !== dmnPath,
-      );
-      const byNs = new Map<string, any>();
-      const externalIds = new Map<string, Map<string, string>>();
-      for (const f of siblings) {
-        try {
-          const m = parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'));
-          if (m.namespace) {
-            byNs.set(m.namespace, m);
-            externalIds.set(m.namespace, m.idMap);
-          }
-        } catch {
-          /* ignored — file may not be DMN */
-        }
-      }
-      // Re-parse siblings with full external context so transitive
-      // imports also resolve correctly.
-      for (const ns of byNs.keys()) {
-        const f = siblings.find((s) => {
-          try {
-            return parseDmn(readFileSync(join(rec.caseDir, s), 'utf8')).namespace === ns;
-          } catch {
-            return false;
-          }
-        });
-        if (f) {
-          const m = parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'), { externalIds });
-          byNs.set(ns, m);
-        }
-      }
-      const model = parseDmn(xml, { externalIds });
-      if (model.imports.length > 0) {
-        const resolveImports = (m: any, seen: Set<string>) => {
-          for (const imp of m.imports) {
-            if (!imp.namespace || seen.has(imp.namespace)) continue;
-            const target = byNs.get(imp.namespace);
-            if (!target) continue;
-            const nextSeen = new Set(seen);
-            nextSeen.add(imp.namespace);
-            resolveImports(target, nextSeen);
-            mergeImport(m, imp.name, target);
-          }
-        };
-        resolveImports(model, new Set([model.namespace ?? '']));
-      }
+      // Two-pass parse for the host plus its siblings so cross-namespace
+      // hrefs and transitive imports resolve before emit. `loadDmnTree`
+      // returns one resolved model per file.
+      const allFiles = readdirSync(rec.caseDir)
+        .filter((f) => f.endsWith('.dmn'))
+        .map((f) => join(rec.caseDir, f));
+      const tree = loadDmnTree(allFiles);
+      const model = tree.get(dmnPath);
+      if (!model) throw new Error('host model failed to parse');
       const ts = emitTs(model, { runtimeImport: '../runtime.js' });
       const dest = join(outDir, 'cases', slug);
       mkdirSync(dest, { recursive: true });
