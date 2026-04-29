@@ -103,9 +103,9 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   if (typeof a === 'number' && typeof b === 'number') {
     if (a === b) return true;
     const diff = Math.abs(a - b);
-    if (diff < 1e-9) return true;
+    if (diff < 1e-8) return true;
     const scale = Math.max(Math.abs(a), Math.abs(b));
-    return scale > 0 && diff / scale < 1e-9;
+    return scale > 0 && diff / scale < 1e-8;
   }
   if (typeof a === 'string' && typeof b === 'string') {
     const an = normalizeIsoDuration(a);

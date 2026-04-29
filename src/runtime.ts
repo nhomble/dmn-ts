@@ -1148,7 +1148,8 @@ export const feel: any = {
     if (typeof key !== 'string') return null;
     return key in m ? (m as Record<string, unknown>)[key] : null;
   },
-  get_entries(m: any): any {
+  get_entries(m: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (m == null || typeof m !== 'object' || Array.isArray(m)) return null;
     return Object.entries(m).map(([key, value]) => ({ key, value }));
   },
