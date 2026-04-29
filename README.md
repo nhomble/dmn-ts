@@ -20,6 +20,9 @@ node -e "import('./dist/index.js').then(m => console.log(
 `npm run tck:all` walks the [DMN TCK](https://github.com/dmn-tck/tck) (495 cases / 9 674 tests) and writes a report under `out/all/`.
 `npm run tck:run <case-dir> <generated-pkg>` runs the fixtures from a single case against an already-built package — useful when iterating on one model without rebuilding the whole suite.
 
-## Inspiration
+## Experiment
 
-Same strategy as [jDMN](https://github.com/goldmansachs/jdmn) (DMN → Java); this is the JavaScript equivalent.
+This repo is meant to be useful first, and then it serves as an interesting experiment around the usefulness of coding agents.
+With the Tck spec + a similar solution in a different language, I wanted to see if a coding agent could converge on a working program.
+
+Check out [jDMN](https://github.com/goldmansachs/jdmn) (DMN → Java).
