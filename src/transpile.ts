@@ -110,11 +110,20 @@ export interface DmnContext {
   entries: DmnContextEntry[];
 }
 
+export interface DmnDecisionService {
+  id?: string;
+  name: string;
+  outputDecisions: string[];
+  inputDecisions: string[];
+  inputData: string[];
+}
+
 export interface DmnModel {
   name: string;
   inputData: DmnInputData[];
   decisions: DmnDecision[];
   bkms: DmnBkm[];
+  decisionServices: DmnDecisionService[];
 }
 
 const xmlParser = new XMLParser({
@@ -135,6 +144,9 @@ const xmlParser = new XMLParser({
       'binding',
       'column',
       'row',
+      'decisionService',
+      'outputDecision',
+      'inputDecision',
     ].includes(name),
 });
 
@@ -240,11 +252,27 @@ export function parseDmn(xml: string): DmnModel {
     };
   });
 
+  const decisionServiceRaw = arr<any>(defs.decisionService);
+  const decisionServices: DmnDecisionService[] = decisionServiceRaw.map((n) => ({
+    id: n['@_id'],
+    name: n['@_name'],
+    outputDecisions: arr<any>(n.outputDecision)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+    inputDecisions: arr<any>(n.inputDecision)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+    inputData: arr<any>(n.inputData)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+  }));
+
   return {
     name: defs['@_name'] ?? 'model',
     inputData,
     decisions,
     bkms,
+    decisionServices,
   };
 }
 
@@ -609,7 +637,7 @@ function emitDecisionTableFn(
   });
   const decisionBindings = decision.requiredDecisions.map((n) => {
     const ident = toJsIdent(n);
-    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
   });
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
@@ -761,7 +789,7 @@ function emitContextFn(
   }
   for (const n of decision.requiredDecisions) {
     const ident = toJsIdent(n);
-    lines.push(`    let ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`);
+    lines.push(`    let ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`);
     declared.add(ident);
   }
 
@@ -837,7 +865,7 @@ function emitInvocationFn(
   });
   const decisionBindings = decision.requiredDecisions.map((n) => {
     const ident = toJsIdent(n);
-    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
   });
   let expr = emitInvocationCall(inv, allNames, cctx);
   if (isScalarTypeRef(decision.typeRef)) {
@@ -864,7 +892,7 @@ function emitRelationFn(
   });
   const decisionBindings = decision.requiredDecisions.map((n) => {
     const ident = toJsIdent(n);
-    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
   });
   const items = rel.rows.map((row) => {
     const props = rel.columns.map((col, i) => {
@@ -906,7 +934,7 @@ function emitDecisionFn(
   });
   const decisionBindings = decision.requiredDecisions.map((n) => {
     const ident = toJsIdent(n);
-    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
   });
   let expr = decision.literalExpressionText
     ? feelExpr(decision.literalExpressionText, allNames, cctx)
@@ -921,6 +949,33 @@ function emitDecisionFn(
     `    return ${expr};`,
     `  },`,
   ].join('\n');
+}
+
+function emitDecisionService(ds: DmnDecisionService): string {
+  // Each input becomes a positional parameter (name preserved as-is for the
+  // ctx assignment). Returns the value of the (single) output decision, or
+  // an object keyed by name if there are multiple outputs.
+  const inputNames = [...ds.inputDecisions, ...ds.inputData];
+  const params = inputNames
+    .map((n) => `${toJsIdent(n)}: any`)
+    .join(', ');
+  const ctxParts = inputNames
+    .map((n) => `${JSON.stringify(n)}: ${toJsIdent(n)}`)
+    .join(', ');
+  let body: string;
+  if (ds.outputDecisions.length === 1) {
+    const out = ds.outputDecisions[0];
+    body = `return decisions[${JSON.stringify(out)}]({ ${ctxParts} });`;
+  } else {
+    const calls = ds.outputDecisions
+      .map(
+        (o) =>
+          `${JSON.stringify(o)}: decisions[${JSON.stringify(o)}](__svcCtx)`,
+      )
+      .join(', ');
+    body = `const __svcCtx: any = { ${ctxParts} };\n  return { ${calls} };`;
+  }
+  return `function ${toJsIdent(ds.name)}(${params}): any {\n  ${body}\n}`;
 }
 
 function emitBkm(
@@ -966,9 +1021,17 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     ...model.inputData.map((i) => i.name),
     ...model.decisions.map((d) => d.name),
     ...model.bkms.map((b) => b.name),
+    ...model.decisionServices.map((s) => s.name),
   ];
   const cctx = buildCompileContext(model);
+  // Decision-service signatures contribute to named-arg resolution.
+  for (const ds of model.decisionServices) {
+    cctx.signatures[ds.name] = [...ds.inputDecisions, ...ds.inputData];
+  }
   const bkmDefs = model.bkms.map((b) => emitBkm(b, allNames, cctx));
+  const decisionServiceDefs = model.decisionServices.map((ds) =>
+    emitDecisionService(ds),
+  );
   return [
     `// @generated by tom-rools — do not edit by hand`,
     `// source DMN model: ${model.name}`,
@@ -977,6 +1040,8 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     ``,
     ...bkmDefs,
     bkmDefs.length ? '' : null,
+    ...decisionServiceDefs,
+    decisionServiceDefs.length ? '' : null,
     `export type DecisionFn = (ctx: Record<string, unknown>) => unknown;`,
     ``,
     `export const inputDataNames: readonly string[] = ${JSON.stringify(
