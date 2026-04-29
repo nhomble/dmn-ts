@@ -1112,7 +1112,17 @@ export const feel: any = {
     }
     return null;
   },
-  context_merge(contexts: any): any {
+  context_merge(contexts: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
+    // Singleton-list rule: a single context flows in as `[context]`.
+    if (
+      contexts &&
+      typeof contexts === 'object' &&
+      !Array.isArray(contexts) &&
+      !(contexts as any).__feel
+    ) {
+      contexts = [contexts];
+    }
     if (!Array.isArray(contexts)) return null;
     const out: Record<string, unknown> = {};
     for (const c of contexts) {
