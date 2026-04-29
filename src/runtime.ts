@@ -99,6 +99,14 @@ export const feel: any = {
   is_time(v: any): boolean {
     return typeof v === 'string' && /^\d{2}:\d{2}:\d{2}/.test(v) && !v.includes('T');
   },
+  // Parse a FEEL time string into seconds-since-midnight (TZ stripped).
+  _time_to_seconds(t: any): number | null {
+    if (typeof t !== 'string') return null;
+    const m = /^(\d{2}):(\d{2}):(\d{2})(\.\d+)?/.exec(t);
+    if (!m) return null;
+    const frac = m[4] ? Number(m[4]) : 0;
+    return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + frac;
+  },
   add_time_duration(t: any, dur: any): any {
     if (typeof t !== 'string' || typeof dur !== 'string') return null;
     const m = /^(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(t);
@@ -168,6 +176,13 @@ export const feel: any = {
     if (feel.is_time(a) && feel.is_duration(b)) {
       const negated = b.startsWith('-') ? b.slice(1) : '-' + b;
       return feel.add_time_duration(a, negated);
+    }
+    if (feel.is_time(a) && feel.is_time(b)) {
+      // time - time = days-and-time duration (TZ-stripped seconds delta).
+      const tA = feel._time_to_seconds(a);
+      const tB = feel._time_to_seconds(b);
+      if (tA == null || tB == null) return null;
+      return feel.dt_format(tA - tB);
     }
     if (typeof a !== 'number' || typeof b !== 'number') return null;
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
@@ -322,6 +337,18 @@ export const feel: any = {
       const tB = Date.UTC(Number(dateB[1]), Number(dateB[2]) - 1, Number(dateB[3]));
       return feel.dt_format((tA - tB) / 1000);
     }
+    // Both endpoints must agree on whether they carry zone info — mixing
+    // zoned and naive datetimes is undefined per FEEL.
+    const isDtZoned = (s: string) =>
+      /T.+(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.test(s);
+    const aZ = isDtZoned(a);
+    const bZ = isDtZoned(b);
+    // Pure dates count as naive (no zone) for this comparison.
+    const aHasDate = !!dateA;
+    const bHasDate = !!dateB;
+    const aHasZone = aHasDate ? false : aZ;
+    const bHasZone = bHasDate ? false : bZ;
+    if (aHasZone !== bHasZone) return null;
     const aForParse = /Z|[+-]\d{2}:\d{2}$/.test(a) ? a : a + 'Z';
     const bForParse = /Z|[+-]\d{2}:\d{2}$/.test(b) ? b : b + 'Z';
     const tA = Date.parse(aForParse);
@@ -1677,7 +1704,7 @@ export const feel: any = {
       let tz: string | undefined = undefined;
       if (args[3] != null) {
         if (typeof args[3] === 'string') {
-          if (/^Z|[+-]\d{2}:\d{2}$/.test(args[3])) {
+          if (/^Z|[+-]\d{2}:\d{2}$/.test(args[3]) || /^@[A-Za-z_+\-/]+$/.test(args[3])) {
             tz = args[3];
           } else if (/^-?P/.test(args[3])) {
             const sec = feel.dt_to_seconds(args[3]);
