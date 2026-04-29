@@ -119,7 +119,9 @@ export function splitTopLevelCommas(s: string): string[] {
 // `<functionDefinition>`s for currying) into FEEL `function(...)` text.
 // Parameter typeRefs (`<formalParameter typeRef="...">`) are preserved
 // as `: typeRef` annotations so the FEEL parser can hand them to the
-// emitter for boundary validation.
+// emitter for boundary validation. A `<functionDefinition typeRef="X">`
+// becomes `function(...) : X body` so the emitter can also wrap the
+// return when X names a function-item.
 function functionDefToFeelText(fd: any): string {
   const fdParams = arr<any>(fd.formalParameter)
     .filter((p) => typeof p['@_name'] === 'string')
@@ -134,7 +136,9 @@ function functionDefToFeelText(fd: any): string {
   } else {
     body = fd.literalExpression?.text ?? 'null';
   }
-  return `function(${fdParams.join(', ')}) ${body}`;
+  const returnType: string | undefined = fd['@_typeRef'];
+  const sig = `function(${fdParams.join(', ')})`;
+  return returnType ? `${sig}: ${returnType} ${body}` : `${sig} ${body}`;
 }
 
 // Extract the FEEL-text body of a boxed sub-expression element. The DMN

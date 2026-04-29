@@ -64,6 +64,10 @@ export type FeelNode =
       // to validate arguments at call time — a non-conforming value coerces
       // to null at the boundary.
       paramTypes?: (string | undefined)[];
+      // Optional return type from `function(...) : Type body`. When this
+      // names a `<functionItem outputTypeRef="X">`, the body's return is
+      // validated against X at call time.
+      returnType?: string;
       body: FeelNode;
     }
   | {
@@ -959,17 +963,37 @@ class Parser {
         }
         if (!this.isPunct(')')) throw new Error('feel parse: expected )');
         this.next();
-        // Optional FEEL function return-type annotation: `: typeName` (ignored).
+        // Optional FEEL function return-type annotation: `: typeName`.
+        // The type itself is exactly one ident token (the tokenizer
+        // already collapses multi-word built-in names like
+        // `date and time` and qualified user-imported names like
+        // `Model B.tType`); namespace-prefixed forms (`feel:string`)
+        // need a `:` continuation.
+        let returnType: string | undefined;
         if (this.isPunct(':')) {
           this.next();
-          this.parsePrimary();
+          const first = this.peek();
+          if (first?.kind === 'ident' || first?.kind === 'kw') {
+            this.next();
+            let collected = first.name;
+            // Optional namespace continuation `prefix:name`.
+            if (this.isPunct(':')) {
+              this.next();
+              const seg = this.peek();
+              if (seg?.kind === 'ident' || seg?.kind === 'kw') {
+                this.next();
+                collected += ':' + seg.name;
+              }
+            }
+            returnType = collected;
+          }
         }
         const body = this.parseExpression();
         const params = paramSpecs.map((p) => p.name);
         const paramTypes = paramSpecs.some((p) => p.typeRef)
           ? paramSpecs.map((p) => p.typeRef)
           : undefined;
-        return { type: 'lambda', params, paramTypes, body };
+        return { type: 'lambda', params, paramTypes, returnType, body };
       }
     }
     if (t.kind === 'ident') {
@@ -1540,14 +1564,24 @@ export function emitFeelNode(
           );
         }
       }
-      const bodyExpr = emitFeelNode(node.body, ctx);
+      // Wrap the return when the declared return type names a
+      // `<functionItem outputTypeRef="X">` — the function's results are
+      // validated against X. Other return-type forms aren't enforced
+      // (the lambda call itself produces an arbitrary FEEL value).
+      let bodyExpr = emitFeelNode(node.body, ctx);
+      if (node.returnType) {
+        const local = node.returnType.includes(':')
+          ? node.returnType.split(':').pop()!
+          : node.returnType;
+        const fnDef = ctx?.functionItems?.get(local);
+        if (fnDef?.outputTypeRef) {
+          bodyExpr = `feel.validate(feel.singleton(${bodyExpr}), ${JSON.stringify(fnDef.outputTypeRef)}, __itemDefs)`;
+        }
+      }
       const fnBody = validations.length
         ? `{ ${validations.join(' ')} return ${bodyExpr}; }`
         : bodyExpr;
-      const arrow = validations.length
-        ? `((${params}): any => ${fnBody})`
-        : `((${params}): any => ${fnBody})`;
-      return `Object.assign(${arrow}, { __params: ${paramsLit} as readonly string[] })`;
+      return `Object.assign(((${params}): any => ${fnBody}), { __params: ${paramsLit} as readonly string[] })`;
     }
     case 'range': {
       const u = node.unboundedLow || node.unboundedHigh;
