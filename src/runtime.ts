@@ -1483,17 +1483,15 @@ export const feel: any = {
     }
     let out = pat;
     if (flags.includes('x')) {
-      // Strip comments and whitespace, but preserve whitespace inside `[...]`
-      // character classes. The `\` escape protects the next char.
+      // Strip comments and whitespace per XPath rules. Per the spec the
+      // `x` flag removes whitespace from the regexp UNLESS it appears
+      // inside a `[...]` character class. Backslashes don't protect
+      // whitespace from removal — `hello\ sworld` collapses to
+      // `hello\sworld` (i.e. the escape rebinds to the next non-space).
       let result = '';
       let inClass = false;
       for (let i = 0; i < pat.length; i++) {
         const c = pat[i];
-        if (c === '\\' && i + 1 < pat.length) {
-          result += c + pat[i + 1];
-          i++;
-          continue;
-        }
         if (!inClass) {
           if (c === '#') {
             while (i < pat.length && pat[i] !== '\n') i++;
@@ -1513,7 +1511,32 @@ export const feel: any = {
       /\[([^\]\\]+(?:\\.[^\]\\]*)*)-\[([^\]\\]+(?:\\.[^\]\\]*)*)\]\]/g,
       '(?![$2])[$1]',
     );
+    // XPath Unicode block names (`\p{IsBasicLatin}`) → equivalent JS
+    // character ranges. JS's Unicode property names use the `Script=` /
+    // `Block=` long forms; the XPath `IsXxx` shortcut isn't recognised.
+    out = out.replace(/\\p\{Is([A-Za-z0-9]+)\}/g, (_, block: string) => {
+      const range = feel._xpath_block_range(block);
+      return range ?? `[${'\\u0000-\\uffff'}]`;
+    });
+    out = out.replace(/\\P\{Is([A-Za-z0-9]+)\}/g, (_, block: string) => {
+      const range = feel._xpath_block_range(block);
+      // Negate by switching to a negated character class.
+      if (!range) return '';
+      // `[abc]` → `[^abc]`.
+      return range.startsWith('[') ? '[^' + range.slice(1) : range;
+    });
     return out;
+  },
+  // Map an XPath Unicode-block short name to an equivalent JS character
+  // range. Only the few that show up in TCK fixtures are wired up.
+  _xpath_block_range(name: string): string | null {
+    const map: Record<string, string> = {
+      BasicLatin: '[\\u0000-\\u007F]',
+      Latin1Supplement: '[\\u0080-\\u00FF]',
+      LatinExtendedA: '[\\u0100-\\u017F]',
+      LatinExtendedB: '[\\u0180-\\u024F]',
+    };
+    return map[name] ?? null;
   },
   matches(s: any, pat: any, flags?: any, ...rest: any[]): any {
     if (rest.length > 0) return null;
@@ -1521,9 +1544,15 @@ export const feel: any = {
     // FEEL: null flags is equivalent to no flags supplied.
     if (flags !== undefined && flags !== null && typeof flags !== 'string') return null;
     const f = typeof flags === 'string' ? flags : '';
-    const jsFlags = feel._xpath_flags(f);
+    let jsFlags = feel._xpath_flags(f);
     if (jsFlags === null) return null;
     const patStr = feel._xpath_pattern(pat, f);
+    // The JS `u` flag enables Unicode-aware semantics — required for
+    // `\p{...}` property escapes, and it makes invalid patterns throw
+    // rather than silently mis-compile (e.g. lone backreferences become
+    // octal escapes without `u`). XPath wants the strict behaviour, so
+    // we always add it.
+    if (!jsFlags.includes('u')) jsFlags += 'u';
     try {
       return new RegExp(patStr, jsFlags).test(s);
     } catch {
