@@ -998,8 +998,20 @@ export const feel: any = {
   },
   list_replace(list: any, position: any, newItem: any): any {
     if (!Array.isArray(list) || position == null) return null;
-    let i = Number(position);
-    if (!Number.isFinite(i)) return null;
+    // Accept either a numeric position (1-based, decimals truncate) or a
+    // predicate `(item, newItem) -> boolean` that selects which entries
+    // to replace.
+    if (typeof position === 'function') {
+      try {
+        return list.map((it: any) =>
+          position(it, newItem) === true ? newItem : it,
+        );
+      } catch {
+        return null;
+      }
+    }
+    if (typeof position !== 'number' || !Number.isFinite(position)) return null;
+    let i = Math.trunc(position);
     if (i < 0) i = list.length + i + 1;
     if (i < 1 || i > list.length) return null;
     const out = [...list];
@@ -1629,6 +1641,17 @@ export const feel: any = {
     if (a === null || b === null) return false;
     if (typeof a !== typeof b) return false;
     if (typeof a === 'number') return a === b;
+    // For datetimes/times, `is` checks wall-clock + zone match (not the
+    // instant), so "12:00:00-01:00" and "17:00:00+04:00" are NOT `is`-equal
+    // even though they're the same instant.
+    if (typeof a === 'string' && typeof b === 'string') {
+      const isDt = (s: string) => /^-?\d{4,9}-\d{2}-\d{2}T/.test(s);
+      const isTime = (s: string) => feel.is_time(s);
+      if ((isDt(a) && isDt(b)) || (isTime(a) && isTime(b))) {
+        // Compare verbatim — but normalize fractional seconds.
+        return a === b;
+      }
+    }
     return feel.eq(a, b);
   },
   instance_of(v: any, typeName: string, itemDefs?: any): any {
