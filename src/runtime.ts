@@ -143,14 +143,16 @@ export const feel: any = {
       return feel.add_time_duration(b, a);
     }
     // FEEL: same-type strict; cross-type → null. Plain string + plain string
-    // is concat; duration/date strings are excluded above.
+    // is concat; duration/date/time strings are excluded above.
     if (
       typeof a === 'string' &&
       typeof b === 'string' &&
       !feel.is_duration(a) &&
       !feel.is_duration(b) &&
       !feel.is_date_or_dt(a) &&
-      !feel.is_date_or_dt(b)
+      !feel.is_date_or_dt(b) &&
+      !feel.is_time(a) &&
+      !feel.is_time(b)
     ) {
       return a + b;
     }
@@ -382,11 +384,15 @@ export const feel: any = {
       }
       return ms;
     };
-    // Mixing naive and zoned dateTimes is undefined. A pure date counts as
-    // "either" — it works against both naive and zoned datetimes.
+    // Mixing naive and zoned dateTimes is undefined. A pure date "implies
+    // UTC" so it must pair with a zoned datetime — naive datetime + date
+    // mixes naive + UTC implicit → null.
     const aZoned = !dateA && isDtZoned(a);
     const bZoned = !dateB && isDtZoned(b);
     if (!dateA && !dateB && aZoned !== bZoned) return null;
+    if ((dateA && !dateB && !bZoned) || (dateB && !dateA && !aZoned)) {
+      return null;
+    }
     const tA = parse(a, dateA);
     const tB = parse(b, dateB);
     if (tA == null || tB == null) return null;
