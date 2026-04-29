@@ -72,6 +72,11 @@ export type FeelNode =
       hi: FeelNode;
       openLow: boolean;
       openHigh: boolean;
+      // `< 10` etc. produces an "unbounded" range whose null endpoint
+      // means "no lower bound" rather than "literal null". Spec treats
+      // `(null..10)` (literal null) as invalid, but `(< 10)` as valid.
+      unboundedLow?: boolean;
+      unboundedHigh?: boolean;
     };
 
 type Token =
@@ -1035,14 +1040,17 @@ class Parser {
           return { type: 'unaryTests', tests: [only] };
         }
         const nullNode: FeelNode = { type: 'null' };
+        // The comparison-form ranges `< X` / `<= X` / `> X` / `>= X`
+        // have an unbounded endpoint — mark it so the runtime keeps
+        // them distinct from literal-null endpoint ranges.
         if (op === '>')
-          return { type: 'range', lo: rhs, hi: nullNode, openLow: true, openHigh: true };
+          return { type: 'range', lo: rhs, hi: nullNode, openLow: true, openHigh: true, unboundedHigh: true };
         if (op === '>=')
-          return { type: 'range', lo: rhs, hi: nullNode, openLow: false, openHigh: true };
+          return { type: 'range', lo: rhs, hi: nullNode, openLow: false, openHigh: true, unboundedHigh: true };
         if (op === '<')
-          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: true };
+          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: true, unboundedLow: true };
         if (op === '<=')
-          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: false };
+          return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: false, unboundedLow: true };
         return { type: 'range', lo: rhs, hi: rhs, openLow: false, openHigh: false };
       }
       // Plain expression
@@ -1542,6 +1550,13 @@ export function emitFeelNode(
       return `Object.assign(${arrow}, { __params: ${paramsLit} as readonly string[] })`;
     }
     case 'range': {
+      const u = node.unboundedLow || node.unboundedHigh;
+      if (u) {
+        // The unbounded form (from `< X` / `> X` etc.) — runtime keeps
+        // these distinct from literal-null endpoint ranges so equality
+        // and `in` semantics differ between the two.
+        return `feel.unbounded_range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh}, ${!!node.unboundedLow}, ${!!node.unboundedHigh})`;
+      }
       return `feel.range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;
     }
   }

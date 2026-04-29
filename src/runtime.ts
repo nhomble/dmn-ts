@@ -769,6 +769,27 @@ export const feel: any = {
     if (lo == null && hi == null) return null;
     return { __feel: 'range', lo, hi, openLow, openHigh };
   },
+  // Build an "unbounded" range from a comparison form (`< X`, `> X`, …).
+  // Stored with a distinct shape so equality with a literal-endpoint
+  // range distinguishes (`(< 10) != (null..10)`).
+  unbounded_range(
+    lo: any,
+    hi: any,
+    openLow: boolean,
+    openHigh: boolean,
+    unboundedLow: boolean,
+    unboundedHigh: boolean,
+  ): any {
+    return {
+      __feel: 'range',
+      lo,
+      hi,
+      openLow,
+      openHigh,
+      unboundedLow,
+      unboundedHigh,
+    };
+  },
   iterate(v: any): any[] {
     if (Array.isArray(v)) return v;
     if (v && typeof v === 'object' && (v as any).__feel === 'range') {
@@ -1006,17 +1027,29 @@ export const feel: any = {
   },
   list_contains(list: any, item: any): any {
     if (list && typeof list === 'object' && list.__feel === 'range') {
-      const { lo, hi, openLow, openHigh } = list;
-      if (lo === null || hi === null) return null;
+      const { lo, hi, openLow, openHigh, unboundedLow, unboundedHigh } = list;
+      // Unbounded endpoints (from `< X`) skip that side of the check;
+      // literal-null endpoints make the `in` test undefined (null).
+      const loNull = lo === null;
+      const hiNull = hi === null;
+      if ((loNull && !unboundedLow) || (hiNull && !unboundedHigh)) return null;
       if (item == null) return null;
       // A degenerate `=X` range (point range, both endpoints same and
       // closed) collapses to equality — handles types like booleans and
       // lists where `<` / `<=` are undefined.
-      if (!openLow && !openHigh && feel.eq(lo, hi) === true) {
+      if (!openLow && !openHigh && !loNull && !hiNull && feel.eq(lo, hi) === true) {
         return feel.eq(lo, item) === true;
       }
-      const lower = openLow ? feel.lt(lo, item) : feel.le(lo, item);
-      const upper = openHigh ? feel.lt(item, hi) : feel.le(item, hi);
+      const lower = unboundedLow
+        ? true
+        : openLow
+          ? feel.lt(lo, item)
+          : feel.le(lo, item);
+      const upper = unboundedHigh
+        ? true
+        : openHigh
+          ? feel.lt(item, hi)
+          : feel.le(item, hi);
       if (lower == null || upper == null) return null;
       return lower === true && upper === true;
     }
