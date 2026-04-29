@@ -41,7 +41,14 @@ export type FeelNode =
     }
   | { type: 'between'; value: FeelNode; lo: FeelNode; hi: FeelNode }
   | { type: 'in'; value: FeelNode; list: FeelNode }
-  | { type: 'instanceof'; value: FeelNode; typeName: string }
+  | {
+      type: 'instanceof';
+      value: FeelNode;
+      typeName: string;
+      // Generic args for `list<T>` / `context<a: T, b: U>` etc. Captured
+      // as the raw text inside `<...>` so the runtime can interpret them.
+      typeArgs?: string;
+    }
   | { type: 'temporal'; value: string }
   | {
       type: 'unaryTests';
@@ -254,6 +261,8 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'round half up': 'round_half_up',
   'round half down': 'round_half_down',
   context: 'context_fn',
+  now: 'now',
+  today: 'today',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
@@ -574,6 +583,54 @@ class Parser {
     }
   }
 
+  // Like `skipTypeArgs` but returns a textual rendering of the args
+  // (best-effort, lossy on some forms) so the emitter can pass them to
+  // the runtime for proper validation.
+  private collectTypeArgs(): string | undefined {
+    if (!this.isOp('<')) return undefined;
+    this.next();
+    let depth = 1;
+    const parts: string[] = [];
+    while (depth > 0 && this.peek()) {
+      const t = this.next();
+      if (t.kind === 'op') {
+        if (t.op === '<') {
+          depth++;
+          parts.push('<');
+        } else if (t.op === '>') {
+          depth--;
+          if (depth > 0) parts.push('>');
+        } else {
+          parts.push(t.op);
+        }
+      } else if (t.kind === 'ident' || t.kind === 'kw') {
+        parts.push(t.name);
+      } else if (t.kind === 'punct') {
+        parts.push(t.ch);
+      } else if (t.kind === 'num') {
+        parts.push(String(t.value));
+      } else if (t.kind === 'str') {
+        parts.push(JSON.stringify(t.value));
+      }
+    }
+    // Re-collapse with surrounding whitespace where it helps readability.
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const prev = parts[i - 1];
+      // Add a space between two identifier-like parts (multi-word names).
+      if (
+        prev &&
+        /[A-Za-z_]/.test(prev[prev.length - 1]) &&
+        /[A-Za-z_]/.test(p[0])
+      ) {
+        out += ' ';
+      }
+      out += p;
+    }
+    return out;
+  }
+
   private parseLambdaParam(): { name: string; typeRef?: string } {
     const t = this.next();
     if (t.kind !== 'ident')
@@ -705,8 +762,9 @@ class Parser {
         const t = this.next();
         parts.push(t.kind === 'ident' ? t.name : t.kind === 'kw' ? t.name : '');
       }
-      // Skip generic params `<…>` and optional `-> type` for function/range/list.
-      this.skipTypeArgs();
+      // Capture generic params `<…>` (used by `list<T>` / `context<a:T>`)
+      // and skip the optional `-> type` for function shapes.
+      const typeArgs = this.collectTypeArgs();
       while (this.isOp('-') && this.peek(1)?.kind === 'op' && (this.peek(1) as any).op === '>') {
         this.next();
         this.next();
@@ -720,6 +778,7 @@ class Parser {
         type: 'instanceof',
         value: left,
         typeName: parts.filter((p) => p).join(' '),
+        typeArgs,
       };
     }
     const compOps = ['<=', '>=', '!=', '<', '>', '='];
@@ -1426,8 +1485,10 @@ export function emitFeelNode(
       return `feel.and(feel.le(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.value, ctx)}), feel.le(${emitFeelNode(node.value, ctx)}, ${emitFeelNode(node.hi, ctx)}))`;
     case 'in':
       return `feel.list_contains(${emitFeelNode(node.list, ctx)}, ${emitFeelNode(node.value, ctx)})`;
-    case 'instanceof':
-      return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)}, typeof __itemDefs !== 'undefined' ? __itemDefs : undefined)`;
+    case 'instanceof': {
+      const argsLit = node.typeArgs ? `, ${JSON.stringify(node.typeArgs)}` : '';
+      return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)}, typeof __itemDefs !== 'undefined' ? __itemDefs : undefined${argsLit})`;
+    }
     case 'unaryTests': {
       const fns = node.tests.map((t) => {
         if (t.kind === 'cmp') {

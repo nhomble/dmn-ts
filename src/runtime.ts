@@ -1783,6 +1783,28 @@ export const feel: any = {
   is_defined(v: any): any {
     return v !== undefined;
   },
+  // Current instant. The `@Etc/UTC` zone makes the value an `instance of
+  // date and time` and avoids any host-timezone leak into the output.
+  // Both `now()` and `today()` take no arguments — extras → null.
+  now(...args: any[]): any {
+    if (args.length > 0) return null;
+    const d = new Date();
+    const y = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const da = String(d.getUTCDate()).padStart(2, '0');
+    const h = String(d.getUTCHours()).padStart(2, '0');
+    const mi = String(d.getUTCMinutes()).padStart(2, '0');
+    const s = String(d.getUTCSeconds()).padStart(2, '0');
+    return `${String(y).padStart(4, '0')}-${mo}-${da}T${h}:${mi}:${s}@Etc/UTC`;
+  },
+  today(...args: any[]): any {
+    if (args.length > 0) return null;
+    const d = new Date();
+    const y = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const da = String(d.getUTCDate()).padStart(2, '0');
+    return `${String(y).padStart(4, '0')}-${mo}-${da}`;
+  },
   // Safely invoke a value as a function. Used for bare-ident call sites
   // where the resolved value may be undefined (unknown name), null, or a
   // non-function — all of which FEEL spells as null.
@@ -1942,9 +1964,71 @@ export const feel: any = {
     }
     return feel.eq(a, b);
   },
-  instance_of(v: any, typeName: string, itemDefs?: any): any {
+  instance_of(v: any, typeName: string, itemDefs?: any, typeArgs?: string): any {
     if (v == null) return false;
     const local = typeName.includes(':') ? typeName.split(':').pop() : typeName;
+    // Generic-shape checks: `list<T>` requires every element to be a T;
+    // `context<a: T, b: U>` requires the value to be a context with each
+    // declared field conforming to its declared type.
+    if (typeArgs) {
+      if (local === 'list') {
+        if (!Array.isArray(v)) return false;
+        const elemType = typeArgs.trim();
+        return v.every(
+          (it) => feel.instance_of(it, elemType, itemDefs) === true,
+        );
+      }
+      if (local === 'context') {
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+        // Parse `name: type, name2: type2` into entries. Type values may
+        // contain nested generic args (`list<T>`) — split on top-level
+        // commas only.
+        const fields: { name: string; type: string }[] = [];
+        let depth = 0;
+        let cur = '';
+        const flush = () => {
+          const idx = cur.indexOf(':');
+          if (idx >= 0) {
+            fields.push({
+              name: cur.slice(0, idx).trim(),
+              type: cur.slice(idx + 1).trim(),
+            });
+          }
+          cur = '';
+        };
+        for (const c of typeArgs) {
+          if (c === '<') {
+            depth++;
+            cur += c;
+          } else if (c === '>') {
+            depth--;
+            cur += c;
+          } else if (c === ',' && depth === 0) {
+            flush();
+          } else {
+            cur += c;
+          }
+        }
+        if (cur.trim()) flush();
+        for (const f of fields) {
+          const fv = (v as Record<string, unknown>)[f.name];
+          if (fv === undefined) return false;
+          if (fv !== null && feel.instance_of(fv, f.type, itemDefs) !== true) {
+            return false;
+          }
+        }
+        return true;
+      }
+      if (local === 'range') {
+        if (!(typeof v === 'object' && (v as any).__feel === 'range')) return false;
+        const elemType = typeArgs.trim();
+        const lo = (v as any).lo;
+        const hi = (v as any).hi;
+        if (lo !== null && feel.instance_of(lo, elemType, itemDefs) !== true) return false;
+        if (hi !== null && feel.instance_of(hi, elemType, itemDefs) !== true) return false;
+        return true;
+      }
+    }
     // User-defined item definitions delegate to their base type. allowedValues
     // are NOT considered for `instance of` per FEEL spec.
     if (itemDefs && local && itemDefs[local]) {
