@@ -894,8 +894,13 @@ export const feel: any = {
   list_contains(list: any, item: any): any {
     if (list && typeof list === 'object' && list.__feel === 'range') {
       const { lo, hi, openLow, openHigh } = list;
-      const lower = lo == null ? true : openLow ? feel.lt(lo, item) : feel.le(lo, item);
-      const upper = hi == null ? true : openHigh ? feel.lt(item, hi) : feel.le(item, hi);
+      // Per FEEL, ranges with null endpoints are not navigable — `in` against
+      // them is undefined (null). Same when the probed item is null.
+      if (lo === null || hi === null) return null;
+      if (item == null) return null;
+      const lower = openLow ? feel.lt(lo, item) : feel.le(lo, item);
+      const upper = openHigh ? feel.lt(item, hi) : feel.le(item, hi);
+      if (lower == null || upper == null) return null;
       return lower === true && upper === true;
     }
     if (list && typeof list === 'object' && list.__feel === 'tests') {
@@ -1537,9 +1542,15 @@ export const feel: any = {
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
     if (Array.isArray(v)) return `[${v.map((x) => feel._formatFeelValue(x)).join(', ')}]`;
     if (typeof v === 'object') {
-      const entries = Object.entries(v).map(
-        ([k, val]) => `${k}: ${feel._formatFeelValue(val)}`,
-      );
+      const entries = Object.entries(v).map(([k, val]) => {
+        // FEEL bare name: ASCII letters/digits/underscore (must start with
+        // letter/underscore). Anything else gets the quoted-string form.
+        const bare = /^[A-Za-z_][A-Za-z0-9_]*$/.test(k);
+        const renderedKey = bare
+          ? k
+          : `"${k.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+        return `${renderedKey}: ${feel._formatFeelValue(val)}`;
+      });
       return `{${entries.join(', ')}}`;
     }
     return String(v);
