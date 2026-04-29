@@ -411,6 +411,18 @@ export const feel: any = {
     // Time and date-and-time equality is to second resolution (TCK 1.3+):
     // strip fractional seconds before comparing.
     if (typeof a === 'string' && typeof b === 'string') {
+      // Durations: same-family compare numerically; cross-family → null.
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const yA = feel.ym_to_months(a);
+        const yB = feel.ym_to_months(b);
+        const dA = feel.dt_to_seconds(a);
+        const dB = feel.dt_to_seconds(b);
+        // Special-case the canonical zero P0M / PT0S — equal across families.
+        if ((yA === 0 || dA === 0) && (yB === 0 || dB === 0)) return true;
+        if (yA != null && yB != null) return yA === yB;
+        if (dA != null && dB != null) return dA === dB;
+        return null;
+      }
       const isTime = feel.is_time(a) && feel.is_time(b);
       const isDt =
         /^-?\d{4,9}-\d{2}-\d{2}T/.test(a) && /^-?\d{4,9}-\d{2}-\d{2}T/.test(b);
