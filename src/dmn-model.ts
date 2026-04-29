@@ -157,13 +157,25 @@ export interface DmnDecisionService {
 
 export type DmnVersion = '1.1' | '1.2' | '1.3' | '1.4' | '1.5' | 'unknown';
 
+export interface DmnImport {
+  // Local alias used to qualify references (`<alias>.<name>`).
+  name: string;
+  // Namespace URL of the imported model — matched against the imported
+  // file's `<definitions namespace="...">` to find the right sibling.
+  namespace: string;
+}
+
 export interface DmnModel {
   name: string;
+  // Optional namespace URL — used to resolve local-href references and
+  // to match against sibling models' import declarations.
+  namespace?: string;
   inputData: DmnInputData[];
   decisions: DmnDecision[];
   bkms: DmnBkm[];
   decisionServices: DmnDecisionService[];
   itemDefinitions: DmnItemDefinition[];
+  imports: DmnImport[];
   // DMN spec version detected from the model's `xmlns` (e.g. '1.2', '1.3').
   // Some semantics differ across versions — most notably DMN13-163 which
   // changed how single-output decision services unwrap.

@@ -47,6 +47,7 @@ const xmlParser = new XMLParser({
       'inputDecision',
       'itemDefinition',
       'itemComponent',
+      'import',
     ].includes(name),
 });
 
@@ -480,13 +481,56 @@ export function parseDmn(xml: string): DmnModel {
     };
   });
 
+  const imports: { name: string; namespace: string }[] = arr<any>(defs.import).map((n) => ({
+    name: n['@_name'] ?? '',
+    namespace: n['@_namespace'] ?? '',
+  }));
+
   return {
     name: defs['@_name'] ?? 'model',
+    namespace: defs['@_namespace'],
     inputData,
     decisions,
     bkms,
     decisionServices,
     itemDefinitions,
+    imports,
     dmnVersion,
   };
+}
+
+// Inline an imported model into the host: every BKM / decision / item
+// definition from `imported` is added to `host` under the qualified name
+// `<alias>.<name>`. Decision-service input/output references and BKM
+// signatures are renamed to match. Only used at the host model level —
+// we don't recurse through transitive imports here (that's the caller's
+// job: merge bottom-up).
+export function mergeImport(
+  host: DmnModel,
+  alias: string,
+  imported: DmnModel,
+): void {
+  const prefix = `${alias}.`;
+  const rename = (name: string) => `${prefix}${name}`;
+  for (const it of imported.itemDefinitions) {
+    host.itemDefinitions.push({ ...it, name: rename(it.name) });
+  }
+  for (const b of imported.bkms) {
+    host.bkms.push({ ...b, name: rename(b.name) });
+  }
+  for (const d of imported.decisions) {
+    host.decisions.push({ ...d, name: rename(d.name) });
+  }
+  for (const i of imported.inputData) {
+    host.inputData.push({ ...i, name: rename(i.name) });
+  }
+  for (const ds of imported.decisionServices) {
+    host.decisionServices.push({
+      ...ds,
+      name: rename(ds.name),
+      outputDecisions: ds.outputDecisions.map(rename),
+      inputDecisions: ds.inputDecisions.map(rename),
+      inputData: ds.inputData.map(rename),
+    });
+  }
 }

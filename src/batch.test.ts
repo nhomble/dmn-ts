@@ -12,6 +12,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { emitTs, parseDmn } from './transpile.js';
+import { mergeImport } from './dmn-parse.js';
 import { getRuntimeSource } from './feel.js';
 import {
   type CaseModule,
@@ -131,6 +132,26 @@ async function main(): Promise<void> {
     try {
       const xml = readFileSync(dmnPath, 'utf8');
       const model = parseDmn(xml);
+      // Resolve `<import>` refs against sibling .dmn files: parse each
+      // candidate, match on namespace, and merge under the alias prefix.
+      if (model.imports.length > 0) {
+        const siblings = readdirSync(rec.caseDir).filter(
+          (f) => f.endsWith('.dmn') && join(rec.caseDir, f) !== dmnPath,
+        );
+        const parsed = siblings.map((f) => {
+          try {
+            return parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'));
+          } catch {
+            return null;
+          }
+        });
+        for (const imp of model.imports) {
+          const target = parsed.find(
+            (m) => m && imp.namespace && m.namespace === imp.namespace,
+          );
+          if (target) mergeImport(model, imp.name, target);
+        }
+      }
       const ts = emitTs(model, { runtimeImport: '../runtime.js' });
       const dest = join(outDir, 'cases', slug);
       mkdirSync(dest, { recursive: true });
