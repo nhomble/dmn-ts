@@ -48,18 +48,65 @@ function buildCompileContext(model: DmnModel): CompileContext {
     ...model.decisionServices.map((s) => s.name),
     ...model.decisions.map((d) => d.name),
   ]);
+  const functionItems = new Map<string, { outputTypeRef?: string }>();
+  for (const it of model.itemDefinitions) {
+    if (it.isFunction) {
+      functionItems.set(it.name, { outputTypeRef: it.functionOutputTypeRef });
+    }
+  }
+  const inputDataTypes = new Map<string, string>();
+  for (const i of model.inputData) {
+    if (i.typeRef) inputDataTypes.set(i.name, i.typeRef);
+  }
   return {
     signatures,
     validatableTypes,
     collectionTypes,
     moduleScopeNames,
     dmnVersion: model.dmnVersion,
+    functionItems,
+    inputDataTypes,
   };
 }
 
 // Build a JS-source literal describing the model's user-defined types
 // (item definitions). The generated runtime helper consumes this to validate
 // decision returns against allowedValues / base types.
+// Build the JS-source bindings prelude shared by every decision-emit
+// path (literal, table, context, invocation, relation, list). Each input
+// data with a declared typeRef is validated at the boundary so a
+// non-conforming value lands as null in the decision body. The `let`
+// form is used for context bodies where downstream code reassigns; the
+// `const` form is the default elsewhere.
+function emitDecisionPrelude(
+  decision: DmnDecision,
+  cctx: CompileContext,
+  decl: 'const' | 'let' = 'const',
+): string[] {
+  const lines: string[] = [];
+  for (const n of decision.requiredInputs) {
+    const ident = toJsIdent(n);
+    const t = cctx.inputDataTypes?.get(n);
+    if (
+      t &&
+      (isScalarTypeRef(t) || cctx.validatableTypes?.has(typeRefLocal(t)))
+    ) {
+      lines.push(
+        `    ${decl} ${ident}: any = (() => { const __v = ctx[${JSON.stringify(n)}]; return __v === null || __v === undefined ? __v : feel.validate(__v, ${JSON.stringify(t)}, __itemDefs); })();`,
+      );
+    } else {
+      lines.push(`    ${decl} ${ident}: any = ctx[${JSON.stringify(n)}];`);
+    }
+  }
+  for (const n of decision.requiredDecisions) {
+    const ident = toJsIdent(n);
+    lines.push(
+      `    ${decl} ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`,
+    );
+  }
+  return lines;
+}
+
 function emitItemDefsLiteral(model: DmnModel): string {
   const props = model.itemDefinitions.map((it) => {
     const fields: string[] = [];
@@ -272,18 +319,10 @@ function emitDecisionTableFn(
   allNames: string[],
   cctx: CompileContext,
 ): string {
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
-  });
+  const prelude = emitDecisionPrelude(decision, cctx);
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
-    ...inputBindings,
-    ...decisionBindings,
+    ...prelude,
     ...emitDecisionTableBody(table, allNames, cctx),
     `  },`,
   ].join('\n');
@@ -456,16 +495,13 @@ function emitContextFn(
 ): string {
   const declared = new Set<string>();
   const lines: string[] = [];
-  for (const n of decision.requiredInputs) {
-    const ident = toJsIdent(n);
-    lines.push(`    let ${ident}: any = ctx[${JSON.stringify(n)}];`);
-    declared.add(ident);
+  // Context bodies can reassign these later (e.g. when a context entry
+  // shadows the same name) so they're declared as `let`.
+  for (const line of emitDecisionPrelude(decision, cctx, 'let')) {
+    lines.push(line);
   }
-  for (const n of decision.requiredDecisions) {
-    const ident = toJsIdent(n);
-    lines.push(`    let ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`);
-    declared.add(ident);
-  }
+  for (const n of decision.requiredInputs) declared.add(toJsIdent(n));
+  for (const n of decision.requiredDecisions) declared.add(toJsIdent(n));
 
   // Each entry's body may reference earlier entries by name. Extend the
   // visible-name list as we go so the FEEL tokenizer recognizes them, and
@@ -552,14 +588,7 @@ function emitInvocationFn(
   allNames: string[],
   cctx: CompileContext,
 ): string {
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
-  });
+  const prelude = emitDecisionPrelude(decision, cctx);
   let expr = emitInvocationCall(inv, allNames, cctx);
   if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
     const isCollection = cctx.collectionTypes?.has(typeRefLocal(decision.typeRef));
@@ -568,8 +597,7 @@ function emitInvocationFn(
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
-    ...inputBindings,
-    ...decisionBindings,
+    ...prelude,
     `    return ${expr};`,
     `  },`,
   ].join('\n');
@@ -581,14 +609,7 @@ function emitRelationFn(
   allNames: string[],
   cctx: CompileContext,
 ): string {
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
-  });
+  const prelude = emitDecisionPrelude(decision, cctx);
   const items = rel.rows.map((row) => {
     const props = rel.columns.map((col, i) => {
       const cell = row.cells[i];
@@ -603,8 +624,7 @@ function emitRelationFn(
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
-    ...inputBindings,
-    ...decisionBindings,
+    ...prelude,
     `    return ${retExpr};`,
     `  },`,
   ].join('\n');
@@ -616,14 +636,7 @@ function emitListFn(
   allNames: string[],
   cctx: CompileContext,
 ): string {
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
-  });
+  const prelude = emitDecisionPrelude(decision, cctx);
   const elements = items.map((t) => (t ? feelExpr(t, allNames, cctx) : 'null'));
   let expr = `[${elements.join(', ')}]`;
   if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
@@ -631,8 +644,7 @@ function emitListFn(
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
-    ...inputBindings,
-    ...decisionBindings,
+    ...prelude,
     `    return ${expr};`,
     `  },`,
   ].join('\n');
@@ -658,14 +670,7 @@ function emitDecisionFn(
   if (decision.listItems) {
     return emitListFn(decision, decision.listItems, allNames, cctx);
   }
-  const inputBindings = decision.requiredInputs.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
-  });
-  const decisionBindings = decision.requiredDecisions.map((n) => {
-    const ident = toJsIdent(n);
-    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
-  });
+  const prelude = emitDecisionPrelude(decision, cctx);
   let expr = decision.literalExpressionText
     ? feelExpr(decision.literalExpressionText, allNames, cctx)
     : '/* TODO: non-literal expression not yet supported */ undefined';
@@ -676,8 +681,7 @@ function emitDecisionFn(
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
-    ...inputBindings,
-    ...decisionBindings,
+    ...prelude,
     `    return ${expr};`,
     `  },`,
   ].join('\n');
@@ -740,11 +744,18 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
     ds.outputDecisions.length === 1 &&
     model.dmnVersion !== '1.1' &&
     model.dmnVersion !== '1.2';
-  // Validate the result against the service's declared typeRef. Applies
-  // for both wrapped and unwrapped forms — e.g. a function-typed service
-  // (tDS_001 → string) rejects a non-function output.
+  // Validate the result against the service's declared typeRef. When the
+  // typeRef points to a `<functionItem outputTypeRef="X">` we redirect to
+  // the function's *return* type (the service IS the function), otherwise
+  // a non-function output would always fail validation.
+  const fnDef = ds.typeRef
+    ? model.itemDefinitions.find(
+        (it) => it.name === typeRefLocal(ds.typeRef!) && it.isFunction,
+      )
+    : undefined;
+  const validateType = fnDef ? fnDef.functionOutputTypeRef : ds.typeRef;
   const wrapValidate = (expr: string) =>
-    ds.typeRef ? `feel.validate(${expr}, ${JSON.stringify(ds.typeRef)}, __itemDefs)` : expr;
+    validateType ? `feel.validate(${expr}, ${JSON.stringify(validateType)}, __itemDefs)` : expr;
   const ret = unwrapsSingle
     ? `return ${wrapValidate(`decisions[${JSON.stringify(ds.outputDecisions[0])}](__svcCtx)`)};`
     : `return ${wrapValidate(`{ ${calls} }`)};`;
@@ -797,7 +808,18 @@ function emitBkm(
   // onto the `<literalExpression typeRef="...">`. Either way the
   // singleton-list rule applies, so `[arg]` from a `number`-typed body
   // unwraps to the scalar before validation.
-  const bodyType = bkm.bodyTypeRef ?? bkm.typeRef;
+  //
+  // When the body type is a `<functionItem outputTypeRef="X">`, the BKM
+  // itself is the function — what we actually validate is the body's
+  // return value against `outputTypeRef`, not the body against the
+  // function-item type (a non-function value would always fail).
+  const rawBodyType = bkm.bodyTypeRef ?? bkm.typeRef;
+  const bodyType = (() => {
+    if (!rawBodyType) return undefined;
+    const local = typeRefLocal(rawBodyType);
+    const fnDef = cctx.functionItems?.get(local);
+    return fnDef ? fnDef.outputTypeRef : rawBodyType;
+  })();
   const wrapBody = (expr: string): string => {
     if (
       !bodyType ||

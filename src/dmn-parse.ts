@@ -116,10 +116,17 @@ export function splitTopLevelCommas(s: string): string[] {
 
 // Translate a boxed `<functionDefinition>` (which may itself nest more
 // `<functionDefinition>`s for currying) into FEEL `function(...)` text.
+// Parameter typeRefs (`<formalParameter typeRef="...">`) are preserved
+// as `: typeRef` annotations so the FEEL parser can hand them to the
+// emitter for boundary validation.
 function functionDefToFeelText(fd: any): string {
   const fdParams = arr<any>(fd.formalParameter)
-    .map((p) => p['@_name'])
-    .filter((n) => typeof n === 'string');
+    .filter((p) => typeof p['@_name'] === 'string')
+    .map((p) => {
+      const name = p['@_name'];
+      const t = p['@_typeRef'];
+      return t ? `${name}: ${t}` : name;
+    });
   let body: string;
   if (fd.functionDefinition) {
     body = functionDefToFeelText(fd.functionDefinition);

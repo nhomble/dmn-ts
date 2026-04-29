@@ -580,11 +580,26 @@ class Parser {
       throw new Error('feel parse: expected parameter name');
     if (this.isPunct(':')) {
       this.next();
-      // Capture type annotation (ident, possibly multi-word, possibly `.member` chain).
+      // Capture the type annotation. It may be a multi-word ident
+      // (`date and time`), a namespace-prefixed name (`feel:string`), or
+      // a `.member` chain — collect identifier tokens through optional
+      // `:` separators (after the first segment) and `.` member access.
       const parts: string[] = [];
-      while (this.peek()?.kind === 'ident' || this.peek()?.kind === 'kw') {
-        const tk = this.next();
-        if (tk.kind === 'ident' || tk.kind === 'kw') parts.push(tk.name);
+      let first = true;
+      while (true) {
+        if (!first && this.isPunct(':')) {
+          // Namespace prefix: emit unchanged, the typeRef is `prefix:name`.
+          this.next();
+          parts.push(':');
+        }
+        const nt = this.peek();
+        if (nt?.kind === 'ident' || nt?.kind === 'kw') {
+          this.next();
+          parts.push(nt.name);
+          first = false;
+          continue;
+        }
+        break;
       }
       while (this.isPunct('.')) {
         this.next();
@@ -593,7 +608,14 @@ class Parser {
           this.next();
         }
       }
-      return { name: t.name, typeRef: parts.join(' ') || undefined };
+      // Re-collapse the parts: idents joined with spaces, but `:`
+      // (namespace separator) joins without surrounding spaces.
+      let typeRef = '';
+      for (const p of parts) {
+        if (p === ':') typeRef += ':';
+        else typeRef += (typeRef && !typeRef.endsWith(':') ? ' ' : '') + p;
+      }
+      return { name: t.name, typeRef: typeRef || undefined };
     }
     return { name: t.name };
   }
@@ -1111,6 +1133,13 @@ export interface CompileContext {
   // duplicate-key context literals were valid in 1.1/1.2 (last wins) and
   // became errors in 1.3+ (DMN14-178).
   dmnVersion?: '1.1' | '1.2' | '1.3' | '1.4' | '1.5' | 'unknown';
+  // User-defined function-item types — `<functionItem outputTypeRef="X">`.
+  // Used by the emitter to forward function-typed BKM/decision return
+  // validation to the underlying output type instead of the function type.
+  functionItems?: Map<string, { outputTypeRef?: string }>;
+  // Map from input-data name to its declared typeRef. Used by the decision
+  // prelude to validate inputs at the boundary.
+  inputDataTypes?: Map<string, string>;
 }
 
 const DEFAULT_CTX: CompileContext = { signatures: {} };
