@@ -166,6 +166,21 @@ function arr<T>(v: T | T[] | undefined): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
+// Translate a boxed `<functionDefinition>` (which may itself nest more
+// `<functionDefinition>`s for currying) into FEEL `function(...)` text.
+function functionDefToFeelText(fd: any): string {
+  const fdParams = arr<any>(fd.formalParameter)
+    .map((p) => p['@_name'])
+    .filter((n) => typeof n === 'string');
+  let body: string;
+  if (fd.functionDefinition) {
+    body = functionDefToFeelText(fd.functionDefinition);
+  } else {
+    body = fd.literalExpression?.text ?? 'null';
+  }
+  return `function(${fdParams.join(', ')}) ${body}`;
+}
+
 export function parseDmn(xml: string): DmnModel {
   const parsed = xmlParser.parse(xml);
   const defs = parsed.definitions;
@@ -198,7 +213,13 @@ export function parseDmn(xml: string): DmnModel {
           typeRef: p['@_typeRef'],
         }))
       : [];
-    const bodyText: string | undefined = enc?.literalExpression?.text;
+    let bodyText: string | undefined = enc?.literalExpression?.text;
+    // A boxed `<functionDefinition>` body is the FEEL-text equivalent of an
+    // anonymous `function(p1, ...) <body>` expression. Nested definitions
+    // produce curried lambdas.
+    if (!bodyText && enc?.functionDefinition) {
+      bodyText = functionDefToFeelText(enc.functionDefinition);
+    }
     const bkmTable = enc?.decisionTable
       ? parseDecisionTableXml(enc.decisionTable)
       : undefined;
@@ -234,8 +255,12 @@ export function parseDmn(xml: string): DmnModel {
         requiredDecisions.push(resolveHref(r.requiredDecision['@_href']));
       }
     }
-    const literalExpressionText: string | undefined =
+    let literalExpressionText: string | undefined =
       n.literalExpression?.text ?? undefined;
+    // Boxed `<functionDefinition>` decision body — the decision IS a lambda.
+    if (!literalExpressionText && n.functionDefinition) {
+      literalExpressionText = functionDefToFeelText(n.functionDefinition);
+    }
 
     const decisionTable = n.decisionTable
       ? parseDecisionTableXml(n.decisionTable)
@@ -1079,10 +1104,9 @@ function emitBkm(
   const params = bkm.parameters
     .map((p) => `${toJsIdent(p.name)}: any`)
     .join(', ');
-  if (/^function\s*\(/.test(text)) {
-    const compiled = compileFeel(text, localNames, cctx);
-    return `const ${toJsIdent(bkm.name)}: any = ${compiled};`;
-  }
+  // The body may itself be a FEEL function expression (`function(a) ...`).
+  // Either way, the BKM is a callable: `bkm(...formalParams)` returns the
+  // body value — which is a lambda when the body starts with `function(`.
   if (bkm.decisionTable) {
     const body = emitDecisionTableBody(bkm.decisionTable, localNames, cctx);
     return `function ${toJsIdent(bkm.name)}(${params}): any {\n${body.join('\n')}\n}`;

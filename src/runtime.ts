@@ -1078,26 +1078,74 @@ export const feel: any = {
     if (typeof s !== 'string' || typeof p !== 'string') return null;
     return s.endsWith(p);
   },
-  // Convert FEEL regex flags (XPath: i, s, m, x) to JS RegExp flags.
+  // Convert FEEL regex flags (XPath: i, s, m, x, q) to JS RegExp flags.
+  // Returns null for any unrecognized flag, mirroring FEEL's strict semantics.
   _xpath_flags(s: string): string | null {
     let out = '';
+    let isUnicode = false;
     for (const c of s) {
-      if (c === 'i' || c === 'm' || c === 's') out += c;
-      else if (c === 'x') {
-        /* handled at pattern level */
+      if (c === 'i') {
+        out += c;
+        // XPath case-insensitive matching is Unicode-aware (Kelvin K vs k);
+        // add JS `u` so the engine performs full case folding.
+        isUnicode = true;
+      } else if (c === 'm' || c === 's') out += c;
+      else if (c === 'x' || c === 'q') {
+        /* handled at pattern level (x: ignore-whitespace; q: literal) */
+      } else {
+        return null;
       }
     }
+    if (isUnicode) out += 'u';
     return out;
   },
   _xpath_pattern(pat: string, flags: string): string {
-    return flags.includes('x')
-      ? pat.replace(/#[^\n]*/g, '').replace(/\s+/g, '')
-      : pat;
+    if (flags.includes('q')) {
+      // q: pattern matches the literal string. Escape regex metachars.
+      return pat.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    }
+    let out = pat;
+    if (flags.includes('x')) {
+      // Strip comments and whitespace, but preserve whitespace inside `[...]`
+      // character classes. The `\` escape protects the next char.
+      let result = '';
+      let inClass = false;
+      for (let i = 0; i < pat.length; i++) {
+        const c = pat[i];
+        if (c === '\\' && i + 1 < pat.length) {
+          result += c + pat[i + 1];
+          i++;
+          continue;
+        }
+        if (!inClass) {
+          if (c === '#') {
+            while (i < pat.length && pat[i] !== '\n') i++;
+            continue;
+          }
+          if (/\s/.test(c)) continue;
+        }
+        if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        result += c;
+      }
+      out = result;
+    }
+    // XPath character-class subtraction `[A-Z-[OI]]` → JS-compatible
+    // negative-lookahead form `(?![OI])[A-Z]`.
+    out = out.replace(
+      /\[([^\]\\]+(?:\\.[^\]\\]*)*)-\[([^\]\\]+(?:\\.[^\]\\]*)*)\]\]/g,
+      '(?![$2])[$1]',
+    );
+    return out;
   },
-  matches(s: any, pat: any, flags?: any): any {
+  matches(s: any, pat: any, flags?: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof s !== 'string' || typeof pat !== 'string') return null;
+    // FEEL: null flags is equivalent to no flags supplied.
+    if (flags !== undefined && flags !== null && typeof flags !== 'string') return null;
     const f = typeof flags === 'string' ? flags : '';
-    const jsFlags = feel._xpath_flags(f) ?? '';
+    const jsFlags = feel._xpath_flags(f);
+    if (jsFlags === null) return null;
     const patStr = feel._xpath_pattern(pat, f);
     try {
       return new RegExp(patStr, jsFlags).test(s);
@@ -1301,37 +1349,76 @@ export const feel: any = {
     }
     return out;
   },
-  range_fn(s: any): any {
+  range_fn(s: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof s !== 'string') return null;
     const trimmed = s.trim();
     const m = /^([\[\(\]])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])$/.exec(trimmed);
     if (!m) return null;
     const opener = m[1];
     const closer = m[4];
-    const parse = (x: string): any => {
+    const parseEndpoint = (x: string): { value: any; kind: string } | null => {
       const t = x.trim();
-      if (t === 'null') return null;
-      if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+      if (t === 'null') return { value: null, kind: 'null' };
+      if (/^-?\d+(\.\d+)?$/.test(t)) return { value: Number(t), kind: 'number' };
       if (/^"/.test(t) && /"$/.test(t)) {
         try {
-          return JSON.parse(t);
+          return { value: JSON.parse(t), kind: 'string' };
         } catch {
-          return undefined;
+          return null;
         }
       }
       if (t.startsWith('@"') && t.endsWith('"')) {
-        return t.slice(2, -1);
+        const raw = t.slice(2, -1);
+        if (/^-?\d{4,9}-\d{2}-\d{2}T/.test(raw)) return { value: raw, kind: 'dateTime' };
+        if (/^-?\d{4,9}-\d{2}-\d{2}$/.test(raw)) return { value: raw, kind: 'date' };
+        if (/^\d{2}:\d{2}/.test(raw)) return { value: raw, kind: 'time' };
+        if (/^-?P/.test(raw)) return { value: raw, kind: 'duration' };
+        return { value: raw, kind: 'string' };
       }
-      return undefined; // parse failed (e.g. nested function call we can't eval)
+      // Function-call literal endpoints like date("…"), time("…"), etc.
+      const callM = /^(date and time|date|time|duration|number)\s*\(\s*"([^"]+)"\s*\)$/.exec(t);
+      if (callM) {
+        const fn = callM[1];
+        const arg = callM[2];
+        if (fn === 'date') {
+          const v = feel.date(arg);
+          return v == null ? null : { value: v, kind: 'date' };
+        }
+        if (fn === 'time') {
+          const v = feel.time(arg);
+          return v == null ? null : { value: v, kind: 'time' };
+        }
+        if (fn === 'date and time') {
+          const v = feel.date_and_time(arg);
+          return v == null ? null : { value: v, kind: 'dateTime' };
+        }
+        if (fn === 'duration') {
+          return /^-?P/.test(arg) ? { value: arg, kind: 'duration' } : null;
+        }
+      }
+      return null;
     };
-    const lo = parse(m[2]);
-    const hi = parse(m[3]);
-    if (lo === undefined || hi === undefined) return null;
-    if (lo === null && hi === null) return null;
+    const loE = parseEndpoint(m[2]);
+    const hiE = parseEndpoint(m[3]);
+    if (!loE || !hiE) return null;
+    if (loE.value === null && hiE.value === null) return null;
+    // Endpoints must agree on type (both null is excluded above).
+    if (
+      loE.value !== null &&
+      hiE.value !== null &&
+      loE.kind !== hiE.kind
+    ) {
+      return null;
+    }
+    // Ordering: low must be <= high.
+    if (loE.value !== null && hiE.value !== null) {
+      if (feel.lt(hiE.value, loE.value) === true) return null;
+    }
     return {
       __feel: 'range',
-      lo,
-      hi,
+      lo: loE.value,
+      hi: hiE.value,
       openLow: opener === '(' || opener === ']',
       openHigh: closer === ')' || closer === '[',
     };
