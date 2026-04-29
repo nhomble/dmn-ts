@@ -176,6 +176,11 @@ export interface DmnModel {
   decisionServices: DmnDecisionService[];
   itemDefinitions: DmnItemDefinition[];
   imports: DmnImport[];
+  // ID → name map collected during parse. Cross-namespace href resolution
+  // (when `<import>` brings in another model) consults the imported
+  // model's idMap to translate `<requiredDecision href="…#_id">` into
+  // the imported decision's name.
+  idMap: Map<string, string>;
   // DMN spec version detected from the model's `xmlns` (e.g. '1.2', '1.3').
   // Some semantics differ across versions — most notably DMN13-163 which
   // changed how single-output decision services unwrap.

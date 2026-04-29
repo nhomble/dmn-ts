@@ -109,6 +109,29 @@ export function listTestFiles(caseDir: string): string[] {
   );
 }
 
+// Recursively expose nested-context input fields as dot-qualified keys
+// in the flat lookup ctx — `{Model B: {modelA: {Person name: "X"}}}`
+// also addressable as `ctx["Model B.modelA.Person name"]`.
+function flattenIntoCtx(
+  ctx: Record<string, unknown>,
+  prefix: string,
+  v: unknown,
+): void {
+  if (
+    v === null ||
+    v === undefined ||
+    typeof v !== 'object' ||
+    Array.isArray(v)
+  ) {
+    return;
+  }
+  for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+    const key = `${prefix}.${k}`;
+    ctx[key] = child;
+    flattenIntoCtx(ctx, key, child);
+  }
+}
+
 export function runTestCases(
   caseDir: string,
   mod: CaseModule | null,
@@ -127,8 +150,14 @@ export function runTestCases(
       const inputs: unknown[] = [];
       for (const inNode of arr<any>(tc.inputNode)) {
         const v = parseTestNodeBody(inNode);
-        ctx[inNode['@_name']] = v;
+        const name = inNode['@_name'];
+        ctx[name] = v;
         inputs.push(v);
+        // Imported-model inputs come in as nested contexts on the host;
+        // the merged model addresses them with `<alias>.<…>` flattened
+        // names. Mirror the nesting into flat keys so both lookup forms
+        // work without reaching into the generated bindings.
+        flattenIntoCtx(ctx, name, v);
       }
       const isService =
         tc['@_type'] === 'decisionService' && tc['@_invocableName'];

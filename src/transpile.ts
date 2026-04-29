@@ -12,7 +12,7 @@ import { emitTs } from './dmn-emit.js';
 // Re-export the public API so existing importers (`cli.ts`, `batch.test.ts`,
 // downstream consumers) don't have to learn the internal layout.
 export { toJsIdent };
-export { parseDmn } from './dmn-parse.js';
+export { parseDmn, type ParseOptions } from './dmn-parse.js';
 export { emitTs, type EmitOptions } from './dmn-emit.js';
 export type {
   DmnBkm,

@@ -131,26 +131,56 @@ async function main(): Promise<void> {
     }
     try {
       const xml = readFileSync(dmnPath, 'utf8');
-      const model = parseDmn(xml);
-      // Resolve `<import>` refs against sibling .dmn files: parse each
-      // candidate, match on namespace, and merge under the alias prefix.
-      if (model.imports.length > 0) {
-        const siblings = readdirSync(rec.caseDir).filter(
-          (f) => f.endsWith('.dmn') && join(rec.caseDir, f) !== dmnPath,
-        );
-        const parsed = siblings.map((f) => {
+      // Pre-parse all sibling .dmn files first so we can build an
+      // (namespace → idMap) registry. The host model needs that
+      // registry during its own parse so cross-namespace hrefs
+      // (`<requiredDecision href="http://…#_id">`) resolve to the
+      // imported decision's name rather than its raw UUID.
+      const siblings = readdirSync(rec.caseDir).filter(
+        (f) => f.endsWith('.dmn') && join(rec.caseDir, f) !== dmnPath,
+      );
+      const byNs = new Map<string, any>();
+      const externalIds = new Map<string, Map<string, string>>();
+      for (const f of siblings) {
+        try {
+          const m = parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'));
+          if (m.namespace) {
+            byNs.set(m.namespace, m);
+            externalIds.set(m.namespace, m.idMap);
+          }
+        } catch {
+          /* ignored — file may not be DMN */
+        }
+      }
+      // Re-parse siblings with full external context so transitive
+      // imports also resolve correctly.
+      for (const ns of byNs.keys()) {
+        const f = siblings.find((s) => {
           try {
-            return parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'));
+            return parseDmn(readFileSync(join(rec.caseDir, s), 'utf8')).namespace === ns;
           } catch {
-            return null;
+            return false;
           }
         });
-        for (const imp of model.imports) {
-          const target = parsed.find(
-            (m) => m && imp.namespace && m.namespace === imp.namespace,
-          );
-          if (target) mergeImport(model, imp.name, target);
+        if (f) {
+          const m = parseDmn(readFileSync(join(rec.caseDir, f), 'utf8'), { externalIds });
+          byNs.set(ns, m);
         }
+      }
+      const model = parseDmn(xml, { externalIds });
+      if (model.imports.length > 0) {
+        const resolveImports = (m: any, seen: Set<string>) => {
+          for (const imp of m.imports) {
+            if (!imp.namespace || seen.has(imp.namespace)) continue;
+            const target = byNs.get(imp.namespace);
+            if (!target) continue;
+            const nextSeen = new Set(seen);
+            nextSeen.add(imp.namespace);
+            resolveImports(target, nextSeen);
+            mergeImport(m, imp.name, target);
+          }
+        };
+        resolveImports(model, new Set([model.namespace ?? '']));
       }
       const ts = emitTs(model, { runtimeImport: '../runtime.js' });
       const dest = join(outDir, 'cases', slug);

@@ -298,7 +298,15 @@ function parseOutputValuesList(text: string): string[] {
   });
 }
 
-export function parseDmn(xml: string): DmnModel {
+// When provided, the parser treats a namespace-qualified href
+// (`http://…#_id`) by looking up `_id` in the matching namespace's id map
+// instead of leaving the bare id as the resolved name. The runner builds
+// this from sibling models before parsing the host.
+export interface ParseOptions {
+  externalIds?: Map<string, Map<string, string>>;
+}
+
+export function parseDmn(xml: string, opts: ParseOptions = {}): DmnModel {
   const parsed = xmlParser.parse(xml);
   const defs = parsed.definitions;
   if (!defs) throw new Error('No <definitions> root element');
@@ -362,11 +370,36 @@ export function parseDmn(xml: string): DmnModel {
     };
   });
 
+  // Build a namespace → alias map from this model's `<import>` elements
+  // so cross-namespace hrefs can be qualified with the import alias.
+  const importsRaw = arr<any>(defs.import).map((n) => ({
+    name: n['@_name'] ?? '',
+    namespace: n['@_namespace'] ?? '',
+  }));
+  const aliasByNs = new Map<string, string>();
+  for (const i of importsRaw) {
+    if (i.namespace && i.name) aliasByNs.set(i.namespace, i.name);
+  }
+
   const resolveHref = (href: string): string => {
     // Hrefs may be local (`#_id`) or namespace-qualified
     // (`http://…#_id`); the part after the `#` is always the local ID.
     const hashIdx = href.indexOf('#');
     const id = hashIdx >= 0 ? href.slice(hashIdx + 1) : href;
+    if (hashIdx > 0) {
+      const ns = href.slice(0, hashIdx);
+      // Cross-namespace href: resolve the id in the imported model's
+      // map and qualify the result with the import alias so it lines
+      // up with the names produced by `mergeImport` later.
+      if (ns !== defs['@_namespace']) {
+        const externalMap = opts.externalIds?.get(ns);
+        const localName = externalMap?.get(id);
+        if (localName) {
+          const alias = aliasByNs.get(ns);
+          return alias ? `${alias}.${localName}` : localName;
+        }
+      }
+    }
     return idToName.get(id) ?? id;
   };
 
@@ -481,10 +514,7 @@ export function parseDmn(xml: string): DmnModel {
     };
   });
 
-  const imports: { name: string; namespace: string }[] = arr<any>(defs.import).map((n) => ({
-    name: n['@_name'] ?? '',
-    namespace: n['@_namespace'] ?? '',
-  }));
+  const imports = importsRaw;
 
   return {
     name: defs['@_name'] ?? 'model',
@@ -495,16 +525,61 @@ export function parseDmn(xml: string): DmnModel {
     decisionServices,
     itemDefinitions,
     imports,
+    idMap: idToName,
     dmnVersion,
   };
 }
 
+// Replace every occurrence of `oldName` with `newName` in `text`,
+// matching only at FEEL-name boundaries (whitespace / punctuation) and
+// skipping the contents of string literals. Used when prefixing
+// imported items so references inside their bodies pick up the new
+// qualified name without mangling string contents like "Hello, World".
+function rewriteName(text: string, oldName: string, newName: string): string {
+  let out = '';
+  let i = 0;
+  const isBoundary = (c: string | undefined) =>
+    c === undefined || /[^A-Za-z0-9_]/.test(c);
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') {
+      // Copy the whole string literal verbatim, honouring `\` escapes.
+      out += c;
+      i++;
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === '\\' && i + 1 < text.length) {
+          out += text[i] + text[i + 1];
+          i += 2;
+          continue;
+        }
+        out += text[i];
+        i++;
+      }
+      if (i < text.length) {
+        out += text[i];
+        i++;
+      }
+      continue;
+    }
+    if (
+      text.startsWith(oldName, i) &&
+      isBoundary(text[i - 1]) &&
+      isBoundary(text[i + oldName.length])
+    ) {
+      out += newName;
+      i += oldName.length;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 // Inline an imported model into the host: every BKM / decision / item
 // definition from `imported` is added to `host` under the qualified name
-// `<alias>.<name>`. Decision-service input/output references and BKM
-// signatures are renamed to match. Only used at the host model level —
-// we don't recurse through transitive imports here (that's the caller's
-// job: merge bottom-up).
+// `<alias>.<name>`. Body references to the renamed names are rewritten so
+// transitive imports keep pointing at the right item after the merge.
 export function mergeImport(
   host: DmnModel,
   alias: string,
@@ -512,22 +587,75 @@ export function mergeImport(
 ): void {
   const prefix = `${alias}.`;
   const rename = (name: string) => `${prefix}${name}`;
+  // Names whose references inside imported bodies need to track the
+  // rename. Item definitions only show up as typeRefs (handled below).
+  const referenceNames = new Set<string>([
+    ...imported.bkms.map((b) => b.name),
+    ...imported.decisions.map((d) => d.name),
+    ...imported.inputData.map((i) => i.name),
+    ...imported.decisionServices.map((s) => s.name),
+  ]);
+  // Sort longest-first so a rename of `A.B` doesn't accidentally consume
+  // a substring of `A.B.C`.
+  const sortedRefs = [...referenceNames].sort((a, b) => b.length - a.length);
+  const rewrite = (text: string | undefined): string | undefined => {
+    if (!text) return text;
+    let out = text;
+    for (const n of sortedRefs) out = rewriteName(out, n, rename(n));
+    return out;
+  };
+  const rewriteTypeRef = (t: string | undefined): string | undefined => {
+    if (!t) return t;
+    const local = t.includes(':') ? t.split(':').pop()! : t;
+    return imported.itemDefinitions.some((it) => it.name === local)
+      ? rename(local)
+      : t;
+  };
   for (const it of imported.itemDefinitions) {
-    host.itemDefinitions.push({ ...it, name: rename(it.name) });
+    host.itemDefinitions.push({
+      ...it,
+      name: rename(it.name),
+      typeRef: rewriteTypeRef(it.typeRef),
+      components: it.components?.map((c) => ({
+        ...c,
+        typeRef: rewriteTypeRef(c.typeRef),
+      })),
+    });
   }
   for (const b of imported.bkms) {
-    host.bkms.push({ ...b, name: rename(b.name) });
+    host.bkms.push({
+      ...b,
+      name: rename(b.name),
+      typeRef: rewriteTypeRef(b.typeRef),
+      bodyText: rewrite(b.bodyText),
+      parameters: b.parameters.map((p) => ({
+        ...p,
+        typeRef: rewriteTypeRef(p.typeRef),
+      })),
+    });
   }
   for (const d of imported.decisions) {
-    host.decisions.push({ ...d, name: rename(d.name) });
+    host.decisions.push({
+      ...d,
+      name: rename(d.name),
+      typeRef: rewriteTypeRef(d.typeRef),
+      requiredInputs: d.requiredInputs.map(rename),
+      requiredDecisions: d.requiredDecisions.map(rename),
+      literalExpressionText: rewrite(d.literalExpressionText),
+    });
   }
   for (const i of imported.inputData) {
-    host.inputData.push({ ...i, name: rename(i.name) });
+    host.inputData.push({
+      ...i,
+      name: rename(i.name),
+      typeRef: rewriteTypeRef(i.typeRef),
+    });
   }
   for (const ds of imported.decisionServices) {
     host.decisionServices.push({
       ...ds,
       name: rename(ds.name),
+      typeRef: rewriteTypeRef(ds.typeRef),
       outputDecisions: ds.outputDecisions.map(rename),
       inputDecisions: ds.inputDecisions.map(rename),
       inputData: ds.inputData.map(rename),
