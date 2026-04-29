@@ -483,27 +483,33 @@ export const feel: any = {
     if (v === null || v === undefined) return null;
     if (typeof typeRef !== 'string') return v;
     const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
-    // User-defined item definition?
     const def = itemDefs && itemDefs[local];
     if (def) {
       if (def.isCollection) {
-        if (!Array.isArray(v)) return null;
+        // FEEL singleton-list rule: a single non-list value flows into a
+        // list-typed slot as a one-element list.
+        if (!Array.isArray(v)) v = [v];
         if (def.base) {
           for (const item of v) {
-            if (feel.validate(item, def.base, itemDefs) === null && item !== null) {
-              return null;
-            }
+            if (item === null) continue;
+            if (feel.validate(item, def.base, itemDefs) === null) return null;
           }
         }
         return v;
       }
-      // Validate against base type — may be primitive (coerce) or another
-      // user-defined type (recurse so its allowedValues constrain ours too).
+      // Validate the base type — but only the *structure*, not its
+      // allowedValues. When this type defines its own allowedValueTests,
+      // those override the base's; when it has none, the base's still
+      // apply (so we run the full base-validate in that case).
       if (def.base) {
-        const validated = feel.validate(v, def.base, itemDefs);
-        if (validated === null) return null;
+        const inheritFromBase = !def.allowedValueTests;
+        if (inheritFromBase) {
+          if (feel.validate(v, def.base, itemDefs) === null) return null;
+        } else {
+          if (feel._validateStructural(v, def.base, itemDefs) === null) return null;
+        }
       }
-      // Then check allowedValueTests — each is a compiled FEEL unary test.
+      // This type's own allowedValueTests — each is a compiled FEEL unary test.
       if (def.allowedValueTests) {
         const ok = def.allowedValueTests.some((t: any) => {
           try {
@@ -525,6 +531,42 @@ export const feel: any = {
           if (c.typeRef && fieldVal !== null) {
             const validated = feel.validate(fieldVal, c.typeRef, itemDefs);
             if (validated === null) return null;
+          }
+        }
+      }
+      return v;
+    }
+    return feel.coerce(v, typeRef);
+  },
+  // Like `validate` but skips allowedValueTests at every level — used to
+  // check structural compatibility against a base type when the derived
+  // type overrides allowedValues.
+  _validateStructural(v: any, typeRef: any, itemDefs: any): any {
+    if (v === null || v === undefined) return null;
+    if (typeof typeRef !== 'string') return v;
+    const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+    const def = itemDefs && itemDefs[local];
+    if (def) {
+      if (def.isCollection) {
+        if (!Array.isArray(v)) return null;
+        if (def.base) {
+          for (const item of v) {
+            if (item === null) continue;
+            if (feel._validateStructural(item, def.base, itemDefs) === null) return null;
+          }
+        }
+        return v;
+      }
+      if (def.base) {
+        if (feel._validateStructural(v, def.base, itemDefs) === null) return null;
+      }
+      if (def.components && def.components.length) {
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+        for (const c of def.components) {
+          const fieldVal = (v as Record<string, unknown>)[c.name];
+          if (fieldVal === undefined) return null;
+          if (c.typeRef && fieldVal !== null) {
+            if (feel._validateStructural(fieldVal, c.typeRef, itemDefs) === null) return null;
           }
         }
       }

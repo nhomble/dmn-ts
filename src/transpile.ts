@@ -54,6 +54,9 @@ export interface DmnDecision {
   context?: DmnContext;
   invocation?: DmnInvocation;
   relation?: DmnRelation;
+  // Boxed `<dmn:list>` body — list of literal expressions whose values form
+  // the list elements at runtime.
+  listItems?: string[];
 }
 
 export interface DmnBkmParameter {
@@ -274,6 +277,9 @@ export function parseDmn(xml: string): DmnModel {
     const relation: DmnRelation | undefined = n.relation
       ? parseRelationXml(n.relation)
       : undefined;
+    const listItems: string[] | undefined = n.list?.literalExpression
+      ? arr<any>(n.list.literalExpression).map((le) => String(le?.text ?? ''))
+      : undefined;
     return {
       id: n['@_id'],
       name: n['@_name'],
@@ -285,6 +291,7 @@ export function parseDmn(xml: string): DmnModel {
       context,
       invocation,
       relation,
+      listItems,
     };
   });
 
@@ -1040,6 +1047,34 @@ function emitRelationFn(
   ].join('\n');
 }
 
+function emitListFn(
+  decision: DmnDecision,
+  items: string[],
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const inputBindings = decision.requiredInputs.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
+  });
+  const decisionBindings = decision.requiredDecisions.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}] !== undefined ? ctx[${JSON.stringify(n)}] : decisions[${JSON.stringify(n)}](ctx);`;
+  });
+  const elements = items.map((t) => (t ? feelExpr(t, allNames, cctx) : 'null'));
+  let expr = `[${elements.join(', ')}]`;
+  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
+    expr = `feel.validate(${expr}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
+  }
+  return [
+    `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+    ...inputBindings,
+    ...decisionBindings,
+    `    return ${expr};`,
+    `  },`,
+  ].join('\n');
+}
+
 function emitDecisionFn(
   decision: DmnDecision,
   allNames: string[],
@@ -1056,6 +1091,9 @@ function emitDecisionFn(
   }
   if (decision.relation) {
     return emitRelationFn(decision, decision.relation, allNames, cctx);
+  }
+  if (decision.listItems) {
+    return emitListFn(decision, decision.listItems, allNames, cctx);
   }
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
