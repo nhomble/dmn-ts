@@ -494,6 +494,15 @@ function emitItemDefsLiteral(model: DmnModel): string {
       );
       fields.push(`allowedValueTests: [${tests.join(', ')}]`);
     }
+    if (it.components && it.components.length) {
+      const comps = it.components
+        .map(
+          (c) =>
+            `{ name: ${JSON.stringify(c.name)}${c.typeRef ? `, typeRef: ${JSON.stringify(c.typeRef)}` : ''} }`,
+        )
+        .join(', ');
+      fields.push(`components: [${comps}]`);
+    }
     return `${JSON.stringify(it.name)}: { ${fields.join(', ')} }`;
   });
   return `{ ${props.join(', ')} }`;
@@ -1104,23 +1113,37 @@ function emitBkm(
   const params = bkm.parameters
     .map((p) => `${toJsIdent(p.name)}: any`)
     .join(', ');
+  // Validate typed parameters at the boundary — if any argument fails to
+  // satisfy its declared type, FEEL says the whole invocation is null.
+  const paramValidations: string[] = [];
+  for (const p of bkm.parameters) {
+    if (p.typeRef && (isScalarTypeRef(p.typeRef) || cctx.validatableTypes?.has(typeRefLocal(p.typeRef)))) {
+      const ident = toJsIdent(p.name);
+      paramValidations.push(
+        `if (${ident} !== undefined && ${ident} !== null && feel.validate(${ident}, ${JSON.stringify(p.typeRef)}, __itemDefs) === null) return null;`,
+      );
+    }
+  }
+  const paramValidationBlock = paramValidations.length
+    ? `  ${paramValidations.join('\n  ')}\n`
+    : '';
   // The body may itself be a FEEL function expression (`function(a) ...`).
   // Either way, the BKM is a callable: `bkm(...formalParams)` returns the
   // body value — which is a lambda when the body starts with `function(`.
   if (bkm.decisionTable) {
     const body = emitDecisionTableBody(bkm.decisionTable, localNames, cctx);
-    return `function ${toJsIdent(bkm.name)}(${params}): any {\n${body.join('\n')}\n}`;
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}${body.join('\n')}\n}`;
   }
   if (bkm.context) {
     const value = emitContextValue(bkm.context, localNames, cctx);
-    return `function ${toJsIdent(bkm.name)}(${params}): any {\n    return ${value};\n}`;
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}    return ${value};\n}`;
   }
   if (bkm.invocation) {
     const expr = emitInvocationCall(bkm.invocation, localNames, cctx);
-    return `function ${toJsIdent(bkm.name)}(${params}): any {\n    return ${expr};\n}`;
+    return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}    return ${expr};\n}`;
   }
   const body = text ? compileFeel(text, localNames, cctx) : 'undefined';
-  return `function ${toJsIdent(bkm.name)}(${params}): any {\n  return ${body};\n}`;
+  return `function ${toJsIdent(bkm.name)}(${params}): any {\n${paramValidationBlock}  return ${body};\n}`;
 }
 
 // Where the generated index.ts should import the runtime from. The default

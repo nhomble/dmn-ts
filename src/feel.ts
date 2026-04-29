@@ -1219,13 +1219,15 @@ export function emitFeelNode(
       if (node.bindings.length === 1 && referencesName(node.body, 'partial')) {
         const b = node.bindings[0];
         const inner = emitFeelNode(node.body, ctx);
-        return `(() => { const partial: any[] = []; for (const ${toJsIdent(b.name)} of feel.iterate(${emitFeelNode(b.range, ctx)})) { partial.push(${inner}); } return partial; })()`;
+        return `(() => { const __it: any = feel.iterateOrNull(${emitFeelNode(b.range, ctx)}); if (__it === null) return null; const partial: any[] = []; for (const ${toJsIdent(b.name)} of __it) { partial.push(${inner}); } return partial; })()`;
       }
+      // Each binding range is iterated; non-iterable input → null result.
       let inner = emitFeelNode(node.body, ctx);
       for (let i = node.bindings.length - 1; i >= 0; i--) {
         const b = node.bindings[i];
         const isLast = i === node.bindings.length - 1;
-        inner = `feel.iterate(${emitFeelNode(b.range, ctx)}).${isLast ? 'map' : 'flatMap'}((${toJsIdent(b.name)}: any) => ${inner})`;
+        const method = isLast ? 'map' : 'flatMap';
+        inner = `(() => { const __it: any = feel.iterateOrNull(${emitFeelNode(b.range, ctx)}); return __it === null ? null : __it.${method}((${toJsIdent(b.name)}: any) => ${inner}); })()`;
       }
       return inner;
     }
@@ -1239,7 +1241,7 @@ export function emitFeelNode(
     case 'in':
       return `feel.list_contains(${emitFeelNode(node.list, ctx)}, ${emitFeelNode(node.value, ctx)})`;
     case 'instanceof':
-      return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)})`;
+      return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)}, typeof __itemDefs !== 'undefined' ? __itemDefs : undefined)`;
     case 'unaryTests': {
       const fns = node.tests.map((t) => {
         if (t.kind === 'cmp') {

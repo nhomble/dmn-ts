@@ -487,6 +487,20 @@ export const feel: any = {
         });
         if (!ok) return null;
       }
+      // Validate structural components: every named component must be
+      // present and (when typed) conform to its declared type. Extra
+      // fields beyond those declared are allowed (FEEL is open-world).
+      if (def.components && def.components.length) {
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+        for (const c of def.components) {
+          const fieldVal = (v as Record<string, unknown>)[c.name];
+          if (fieldVal === undefined) return null;
+          if (c.typeRef && fieldVal !== null) {
+            const validated = feel.validate(fieldVal, c.typeRef, itemDefs);
+            if (validated === null) return null;
+          }
+        }
+      }
       return v;
     }
     return feel.coerce(v, typeRef);
@@ -545,25 +559,68 @@ export const feel: any = {
         openHigh: boolean;
       };
       if (
-        lo == null ||
-        hi == null ||
-        typeof lo !== 'number' ||
-        typeof hi !== 'number' ||
-        !Number.isInteger(lo) ||
-        !Number.isInteger(hi)
+        typeof lo === 'number' &&
+        typeof hi === 'number' &&
+        Number.isInteger(lo) &&
+        Number.isInteger(hi)
       ) {
-        return [];
+        if (Math.abs(hi - lo) > 1_000_000) return [];
+        const out: number[] = [];
+        const step = lo <= hi ? 1 : -1;
+        const cur = openLow ? lo + step : lo;
+        const end = openHigh ? hi - step : hi;
+        if (step > 0) for (let i = cur; i <= end; i++) out.push(i);
+        else for (let i = cur; i >= end; i--) out.push(i);
+        return out;
       }
-      if (Math.abs(hi - lo) > 1_000_000) return [];
-      const out: number[] = [];
-      const step = lo <= hi ? 1 : -1;
-      const cur = openLow ? lo + step : lo;
-      const end = openHigh ? hi - step : hi;
-      if (step > 0) for (let i = cur; i <= end; i++) out.push(i);
-      else for (let i = cur; i >= end; i--) out.push(i);
-      return out;
+      // Date ranges: iterate day-by-day.
+      const isDate = (s: any) =>
+        typeof s === 'string' && /^-?\d{4,9}-\d{2}-\d{2}$/.test(s);
+      if (isDate(lo) && isDate(hi)) {
+        const out: string[] = [];
+        const ascending = lo <= hi;
+        const stepDur = ascending ? 'P1D' : '-P1D';
+        let cur = openLow
+          ? feel.add_date_duration(lo, stepDur)
+          : lo;
+        const end = openHigh
+          ? feel.add_date_duration(hi, ascending ? '-P1D' : 'P1D')
+          : hi;
+        if (cur == null || end == null) return [];
+        let safety = 1_000_000;
+        if (ascending) {
+          while (cur <= end && safety-- > 0) {
+            out.push(cur);
+            cur = feel.add_date_duration(cur, stepDur);
+            if (cur == null) break;
+          }
+        } else {
+          while (cur >= end && safety-- > 0) {
+            out.push(cur);
+            cur = feel.add_date_duration(cur, stepDur);
+            if (cur == null) break;
+          }
+        }
+        return out;
+      }
+      return [];
     }
     return [];
+  },
+  // Like `iterate`, but returns null for non-iterable values (e.g. a string
+  // range). Used by `for`/`some`/`every` to propagate FEEL's null semantics.
+  iterateOrNull(v: any): any[] | null {
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object' && (v as any).__feel === 'range') {
+      const { lo, hi } = v as { lo: any; hi: any };
+      const isInt = (x: any) => typeof x === 'number' && Number.isInteger(x);
+      const isDate = (x: any) =>
+        typeof x === 'string' && /^-?\d{4,9}-\d{2}-\d{2}$/.test(x);
+      if (isInt(lo) && isInt(hi)) return feel.iterate(v);
+      if (isDate(lo) && isDate(hi)) return feel.iterate(v);
+      return null;
+    }
+    return null;
   },
   // Treat a value as a list. Arrays pass through; ranges expand. Anything
   // else is null (a "not a list" signal for callers).
@@ -1431,9 +1488,32 @@ export const feel: any = {
     if (typeof a === 'number') return a === b;
     return feel.eq(a, b);
   },
-  instance_of(v: any, typeName: string): any {
+  instance_of(v: any, typeName: string, itemDefs?: any): any {
     if (v == null) return false;
     const local = typeName.includes(':') ? typeName.split(':').pop() : typeName;
+    // User-defined item definitions delegate to their base type. allowedValues
+    // are NOT considered for `instance of` per FEEL spec.
+    if (itemDefs && local && itemDefs[local]) {
+      const def = itemDefs[local];
+      if (def.isCollection) {
+        if (!Array.isArray(v)) return false;
+        if (!def.base) return true;
+        return v.every((it: any) => feel.instance_of(it, def.base, itemDefs) === true);
+      }
+      if (def.components && def.components.length) {
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+        for (const c of def.components) {
+          const fv = (v as Record<string, unknown>)[c.name];
+          if (fv === undefined) return false;
+          if (c.typeRef && fv !== null && feel.instance_of(fv, c.typeRef, itemDefs) !== true) {
+            return false;
+          }
+        }
+        return true;
+      }
+      if (def.base) return feel.instance_of(v, def.base, itemDefs);
+      return true;
+    }
     switch (local) {
       case 'string':
         return (
