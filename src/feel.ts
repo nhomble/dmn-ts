@@ -1327,13 +1327,14 @@ export function emitFeelNode(
     case 'member':
       return `feel.prop(${emitFeelNode(node.obj, ctx)}, ${JSON.stringify(node.name)})`;
     case 'if': {
-      // FEEL `if` requires a boolean condition — anything else (string,
-      // number, null, list, …) makes the whole expression null. JS truthy
-      // semantics would otherwise pick `then` for any non-empty string.
+      // FEEL `if` semantics: `true` → then, `false` or `null` → else,
+      // any other non-boolean value (string, number, list, …) → null.
+      // The null-→-else carve-out matches every TCK 0032 fixture; the
+      // non-boolean → null rule is what 1150 boxed-conditional asserts.
       const cond = emitFeelNode(node.cond, ctx);
       const thenE = emitFeelNode(node.thenE, ctx);
       const elseE = emitFeelNode(node.elseE, ctx);
-      return `(() => { const __c: any = (${cond}); return __c === true ? (${thenE}) : __c === false ? (${elseE}) : null; })()`;
+      return `(() => { const __c: any = (${cond}); return __c === true ? (${thenE}) : (__c === false || __c === null) ? (${elseE}) : null; })()`;
     }
     case 'list':
       return `[${node.items.map((i) => emitFeelNode(i, ctx)).join(', ')}]`;
