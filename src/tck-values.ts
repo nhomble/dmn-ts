@@ -12,7 +12,10 @@
 export function smartCoerce(raw: string): unknown {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
-  if (raw === '' || raw === 'null') return raw === '' ? '' : null;
+  // `<value/>` (empty text, no xsi:type) is conventionally null in TCK
+  // fixtures — explicit empty strings use `xsi:type="xsd:string"`. The
+  // word `null` is also treated as a null literal.
+  if (raw === '' || raw === 'null') return null;
   // A signed decimal (also accepts the leading-dot form `.041`) that
   // round-trips through `Number` is treated as number.
   if (/^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(raw)) {

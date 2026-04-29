@@ -13,8 +13,11 @@ test('smartCoerce: literal booleans', () => {
   assert.equal(smartCoerce('false'), false);
 });
 
-test('smartCoerce: empty string preserved, "null" becomes null', () => {
-  assert.equal(smartCoerce(''), '');
+test('smartCoerce: empty text and the word "null" both become null', () => {
+  // Conventionally `<value/>` (empty, no xsi:type) means null in TCK
+  // fixtures; explicit empty strings use `xsi:type="xsd:string"` so the
+  // typed branch in `castByXsi` still preserves "".
+  assert.equal(smartCoerce(''), null);
   assert.equal(smartCoerce('null'), null);
 });
 
