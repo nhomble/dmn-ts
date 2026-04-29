@@ -823,7 +823,9 @@ export const feel: any = {
     if (probed && typeof probe === 'boolean' && list.every((it: any) => fn(it) === probe)) {
       return probe ? list.slice() : [];
     }
-    // Filter mode: a non-boolean predicate result poisons the filter to null.
+    // Filter mode: predicate must return a boolean per element. A null
+    // result excludes that element (common for property accesses on items
+    // that lack the property); any other non-boolean poisons to null.
     const out: any[] = [];
     for (const it of list) {
       let r: any;
@@ -832,6 +834,7 @@ export const feel: any = {
       } catch {
         return null;
       }
+      if (r === null) continue;
       if (typeof r !== 'boolean') return null;
       if (r) out.push(it);
     }
