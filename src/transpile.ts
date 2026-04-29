@@ -1234,9 +1234,10 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     ...model.decisionServices.map((s) => s.name),
   ];
   const cctx = buildCompileContext(model);
-  // Decision-service signatures contribute to named-arg resolution.
+  // Decision-service signatures contribute to named-arg resolution. Order
+  // must match `emitDecisionService` (inputData first, then inputDecisions).
   for (const ds of model.decisionServices) {
-    cctx.signatures[ds.name] = [...ds.inputDecisions, ...ds.inputData];
+    cctx.signatures[ds.name] = [...ds.inputData, ...ds.inputDecisions];
   }
   const bkmDefs = model.bkms.map((b) => emitBkm(b, allNames, cctx));
   const decisionServiceDefs = model.decisionServices.map((ds) =>
