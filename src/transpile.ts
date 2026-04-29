@@ -1291,11 +1291,19 @@ export interface EmitOptions {
 
 export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
   const runtimeImport = opts.runtimeImport ?? './runtime.js';
+  // Include item-definition component names as known multi-word identifiers
+  // so filter predicates like `Flight List[ Flight Number = ... ]` tokenize
+  // `Flight Number` as a single name.
+  const componentNames = new Set<string>();
+  for (const it of model.itemDefinitions) {
+    for (const c of it.components ?? []) componentNames.add(c.name);
+  }
   const allNames = [
     ...model.inputData.map((i) => i.name),
     ...model.decisions.map((d) => d.name),
     ...model.bkms.map((b) => b.name),
     ...model.decisionServices.map((s) => s.name),
+    ...componentNames,
   ];
   const cctx = buildCompileContext(model);
   // Decision-service signatures contribute to named-arg resolution. Order

@@ -1578,10 +1578,18 @@ export const feel: any = {
       const decSep = typeof dec === 'string' ? dec : '.';
       // FEEL: separators must differ if both are non-null
       if (group && decSep && group === decSep) return null;
+      // The string may only contain digits, sign, exponent, the declared
+      // group separator, and the declared decimal separator. A literal `.`
+      // when `dec` is something else (e.g. `:`) is a parse error.
+      const allowed = new Set(['0','1','2','3','4','5','6','7','8','9','-','+','e','E']);
+      if (group) for (const c of group) allowed.add(c);
+      for (const c of decSep) allowed.add(c);
+      for (const c of s) {
+        if (!allowed.has(c)) return null;
+      }
       let str = s;
       if (group) str = str.split(group).join('');
       if (decSep !== '.') str = str.split(decSep).join('.');
-      // After substitutions only digits, sign, single decimal, exponent allowed.
       if (!/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(str)) return null;
       const n = Number(str);
       return Number.isFinite(n) ? n : null;
