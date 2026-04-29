@@ -81,6 +81,12 @@ export type FeelNode =
       // `(null..10)` (literal null) as invalid, but `(< 10)` as valid.
       unboundedLow?: boolean;
       unboundedHigh?: boolean;
+      // True when the range came from a bracketed form like `[2..4]`,
+      // `(2..4)`, `]2..4[`, etc. DMN 1.5 treats a bracketed range with
+      // `lo > hi` as invalid (null); the unbracketed `2..4` syntax is
+      // not a range literal but list-iteration shorthand and may
+      // descend.
+      bracketed?: boolean;
     };
 
 type Token =
@@ -1033,6 +1039,7 @@ class Parser {
         hi,
         openLow: true,
         openHigh: closer === ')' || closer === '[',
+        bracketed: true,
       };
     }
     if (t.kind === 'punct' && t.ch === '(') {
@@ -1060,7 +1067,9 @@ class Parser {
       if (only.kind === 'cmp') {
         const op = only.op;
         const rhs = only.rhs;
-        if (op === '!=') {
+        // `(=X)` and `(!=X)` are equality tests — keep them as unaryTests
+        // so they don't get conflated with a closed range like `[X..X]`.
+        if (op === '=' || op === '!=') {
           return { type: 'unaryTests', tests: [only] };
         }
         const nullNode: FeelNode = { type: 'null' };
@@ -1075,7 +1084,7 @@ class Parser {
           return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: true, unboundedLow: true };
         if (op === '<=')
           return { type: 'range', lo: nullNode, hi: rhs, openLow: true, openHigh: false, unboundedLow: true };
-        return { type: 'range', lo: rhs, hi: rhs, openLow: false, openHigh: false };
+        return { type: 'unaryTests', tests: [only] };
       }
       // Plain expression
       const inner = only.expr;
@@ -1089,6 +1098,7 @@ class Parser {
           hi: inner.hi,
           openLow: true,
           openHigh: closer === ')',
+          bracketed: true,
         };
       }
       if (closer !== ')') throw new Error('feel parse: expected )');
@@ -1117,6 +1127,7 @@ class Parser {
           hi: first.hi,
           openLow: false,
           openHigh: closer === ')' || closer === '[',
+          bracketed: true,
         };
       }
       const items: FeelNode[] = [first];
@@ -1336,12 +1347,29 @@ const FEEL_PARAM_ALIASES: Record<string, Record<string, string>> = {
   'context put': { keys: 'key' },
 };
 
+// Version-specific signature overrides. DMN 1.2 used `number` for `abs`'s
+// only parameter; 1.3 renamed it to `n`. Overrides apply only to the named
+// version — older calls that used the old name pass, and the newer name is
+// rejected as an unknown named arg (test 007).
+const FEEL_BUILTIN_PARAMS_BY_VERSION: Record<string, Record<string, string[]>> = {
+  '1.2': {
+    abs: ['number'],
+  },
+};
+
 function lookupSignature(
   fn: FeelNode,
   ctx: CompileContext,
 ): string[] | undefined {
   if (fn.type !== 'ident') return undefined;
-  return ctx.signatures[fn.name] ?? FEEL_BUILTIN_PARAMS[fn.name];
+  const versionOverrides = ctx.dmnVersion
+    ? FEEL_BUILTIN_PARAMS_BY_VERSION[ctx.dmnVersion]
+    : undefined;
+  return (
+    ctx.signatures[fn.name] ??
+    versionOverrides?.[fn.name] ??
+    FEEL_BUILTIN_PARAMS[fn.name]
+  );
 }
 
 function resolveParamAlias(fnName: string, paramName: string): string {
@@ -1386,7 +1414,18 @@ export function emitFeelNode(
           for (const na of node.namedArgs) {
             const canonical = resolveParamAlias(fnName, na.name);
             const idx = sig.indexOf(canonical);
-            const v = emitFeelNode(na.value, ctx);
+            let v = emitFeelNode(na.value, ctx);
+            // DMN 1.3/1.4 split `context put`'s key arg: `key:` requires
+            // a string, `keys:` requires a list. 1.5 unified both under
+            // `key:`, so 1.5 onwards skips this guard.
+            if (
+              fnName === 'context put' &&
+              na.name === 'key' &&
+              ctx?.dmnVersion &&
+              ctx.dmnVersion < '1.5'
+            ) {
+              v = `((__k) => (typeof __k === 'string' ? __k : null))(${v})`;
+            }
             while (positional.length <= idx) positional.push('undefined');
             positional[idx] = v;
           }
@@ -1522,22 +1561,28 @@ export function emitFeelNode(
       return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)}, typeof __itemDefs !== 'undefined' ? __itemDefs : undefined${argsLit})`;
     }
     case 'unaryTests': {
-      const fns = node.tests.map((t) => {
+      // Each test is emitted as both a callable predicate and a
+      // structural descriptor (`{op, rhs}`); the descriptor lets two
+      // unary-test values compare equal when they share the same
+      // syntactic shape (`(!= 10)` = `(!= 10)`).
+      const opMap: Record<string, string> = {
+        '<': 'lt',
+        '<=': 'le',
+        '>': 'gt',
+        '>=': 'ge',
+        '=': 'eq',
+        '!=': 'neq',
+      };
+      const entries = node.tests.map((t) => {
         if (t.kind === 'cmp') {
-          const opMap: Record<string, string> = {
-            '<': 'lt',
-            '<=': 'le',
-            '>': 'gt',
-            '>=': 'ge',
-            '=': 'eq',
-            '!=': 'neq',
-          };
           const fn = opMap[t.op];
-          return `(__item: any) => feel.${fn}(__item, ${emitFeelNode(t.rhs, ctx)}) === true`;
+          const rhs = emitFeelNode(t.rhs, ctx);
+          return `{ op: ${JSON.stringify(t.op)}, rhs: ${rhs}, test: (__item: any) => feel.${fn}(__item, ${rhs}) === true }`;
         }
-        return `(__item: any) => feel.eq(__item, ${emitFeelNode(t.expr, ctx)}) === true`;
+        const expr = emitFeelNode(t.expr, ctx);
+        return `{ op: "=", rhs: ${expr}, test: (__item: any) => feel.eq(__item, ${expr}) === true }`;
       });
-      return `{ __feel: 'tests', tests: [${fns.join(', ')}] }`;
+      return `{ __feel: 'tests', tests: [${entries.join(', ')}] }`;
     }
     case 'temporal': {
       const v = node.value;
@@ -1586,10 +1631,28 @@ export function emitFeelNode(
     case 'range': {
       const u = node.unboundedLow || node.unboundedHigh;
       if (u) {
-        // The unbounded form (from `< X` / `> X` etc.) — runtime keeps
-        // these distinct from literal-null endpoint ranges so equality
-        // and `in` semantics differ between the two.
+        // Comparison forms (`< X`, `> X`, …): the lo/hi placeholder is
+        // a synthetic null. Runtime keeps these distinct from
+        // literal-null endpoint ranges so equality and `in` semantics
+        // differ between the two.
         return `feel.unbounded_range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh}, ${!!node.unboundedLow}, ${!!node.unboundedHigh})`;
+      }
+      // DMN 1.5 made literal `null` as a range endpoint a hard null:
+      // `(null..10)` parses as a range whose endpoint is the null
+      // literal, and the whole expression evaluates to null. Earlier
+      // versions only accepted null endpoints via inputs (where it
+      // looks the same at runtime but parses differently), and the
+      // resulting range is treated as a normal half-bounded range.
+      const isLiteralNull = (n: FeelNode) => n.type === 'null';
+      const isDmn15 = ctx?.dmnVersion === '1.5';
+      if (isDmn15 && (isLiteralNull(node.lo) || isLiteralNull(node.hi))) {
+        return 'null';
+      }
+      // DMN 1.5 rejects bracketed ranges with `lo > hi` for orderable
+      // endpoints (numbers, dates). Earlier versions iterated the range
+      // descending, so they keep the unchecked constructor.
+      if (isDmn15 && node.bracketed) {
+        return `feel.bracketed_range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;
       }
       return `feel.range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;
     }

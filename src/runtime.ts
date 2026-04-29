@@ -490,6 +490,29 @@ export const feel: any = {
       const scale = Math.max(Math.abs(a), Math.abs(b));
       return diff < 1e-9 || (scale > 0 && diff / scale < 1e-9);
     }
+    // Two unary-test values compare equal when their syntactic
+    // descriptors match (same op + same rhs at each position).
+    if (
+      a && b &&
+      typeof a === 'object' && typeof b === 'object' &&
+      (a as any).__feel === 'tests' && (b as any).__feel === 'tests'
+    ) {
+      const ta = (a as any).tests as any[];
+      const tb = (b as any).tests as any[];
+      if (ta.length !== tb.length) return false;
+      for (let i = 0; i < ta.length; i++) {
+        if (ta[i].op !== tb[i].op) return false;
+        if (feel.eq(ta[i].rhs, tb[i].rhs) !== true) return false;
+      }
+      return true;
+    }
+    // A test compared against any other shape is unequal — types don't match.
+    if (
+      a && typeof a === 'object' && (a as any).__feel === 'tests'
+    ) return false;
+    if (
+      b && typeof b === 'object' && (b as any).__feel === 'tests'
+    ) return false;
     if (
       a && b &&
       typeof a === 'object' && typeof b === 'object' &&
@@ -768,6 +791,21 @@ export const feel: any = {
   range(lo: any, hi: any, openLow = false, openHigh = false): any {
     if (lo == null && hi == null) return null;
     return { __feel: 'range', lo, hi, openLow, openHigh };
+  },
+  // DMN 1.5 bracketed range: `[lo..hi]`, `(lo..hi)` and friends. A
+  // bracketed range with two orderable endpoints in descending order
+  // is invalid (returns null). Earlier versions used the unchecked
+  // `range` constructor and iterated descending lists.
+  bracketed_range(lo: any, hi: any, openLow = false, openHigh = false): any {
+    if (lo != null && hi != null) {
+      const isNum = (x: any) => typeof x === 'number';
+      const isDate = (s: any) =>
+        typeof s === 'string' && /^-?\d{4,9}-\d{2}-\d{2}/.test(s);
+      if ((isNum(lo) && isNum(hi)) || (isDate(lo) && isDate(hi))) {
+        if (lo > hi) return null;
+      }
+    }
+    return feel.range(lo, hi, openLow, openHigh);
   },
   // Build an "unbounded" range from a comparison form (`< X`, `> X`, …).
   // Stored with a distinct shape so equality with a literal-endpoint
@@ -1055,8 +1093,8 @@ export const feel: any = {
     }
     if (list && typeof list === 'object' && list.__feel === 'tests') {
       // Positive unary tests — match if any test passes. Tests may themselves
-      // reference ranges/lists; predicate already returns true/false.
-      return list.tests.some((fn: any) => fn(item) === true);
+      // reference ranges/lists; the predicate already returns true/false.
+      return list.tests.some((t: any) => t.test(item) === true);
     }
     if (list == null) return null;
     // FEEL singleton rule: scalar `x in v` treats v as `[v]`.
@@ -1371,6 +1409,17 @@ export const feel: any = {
         if (key === 'end included') return !(o as any).openHigh;
         return null;
       }
+      // A single `=X` unary test exposes range-like properties — it
+      // behaves like `[X..X]` for property access, even though it
+      // remains distinct under equality.
+      if ((o as any).__feel === 'tests') {
+        const ts = (o as any).tests as any[];
+        if (ts.length === 1 && ts[0].op === '=') {
+          if (key === 'start' || key === 'end') return ts[0].rhs;
+          if (key === 'start included' || key === 'end included') return true;
+        }
+        return null;
+      }
       return key in o ? o[key] : null;
     }
     return null;
@@ -1513,6 +1562,24 @@ export const feel: any = {
     if (flags.includes('q')) {
       // q: pattern matches the literal string. Escape regex metachars.
       return pat.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    }
+    // XPath rejects back-references (\0..\9) inside a character class —
+    // JS would silently treat them as null/octal escapes and produce a
+    // valid-but-wrong pattern. Returning a poison pattern forces matches/
+    // replace into the catch-block, propagating null per FEEL semantics.
+    {
+      let inClass = false;
+      for (let i = 0; i < pat.length; i++) {
+        const c = pat[i];
+        if (c === '\\' && i + 1 < pat.length) {
+          const nxt = pat[i + 1];
+          if (inClass && nxt >= '0' && nxt <= '9') return '\\u{ffff_invalid}';
+          i++;
+          continue;
+        }
+        if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+      }
     }
     let out = pat;
     if (flags.includes('x')) {
