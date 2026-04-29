@@ -26,6 +26,8 @@ export interface DmnDecisionTableOutput {
   name?: string;
   typeRef?: string;
   outputValues?: string[];
+  // FEEL expression to use when no rule matches (`<defaultOutputEntry>`).
+  defaultText?: string;
 }
 
 export interface DmnDecisionTableRule {
@@ -287,6 +289,7 @@ function parseDecisionTableXml(dt: any): DmnDecisionTable {
       name: o['@_name'],
       typeRef: o['@_typeRef'],
       outputValues,
+      defaultText: o.defaultOutputEntry?.text,
     };
   });
   const rules: DmnDecisionTableRule[] = arr<any>(dt.rule).map((r) => ({
@@ -536,6 +539,27 @@ function emitDecisionTableBody(
     lines.push(`    // rule ${ri + 1}`);
     lines.push(`    if (${cond}) { __matches.push(${outExpr}); }`);
   });
+  // <defaultOutputEntry> — used when no rule matched.
+  const hasDefaults = table.outputs.some((o) => o.defaultText);
+  if (hasDefaults) {
+    let defExpr: string;
+    if (outputIsObject) {
+      const parts = table.outputs.map((o, oi) => {
+        const v = o.defaultText
+          ? feelExpr(o.defaultText, allNames, cctx)
+          : 'null';
+        return `${JSON.stringify(o.name ?? `output${oi}`)}: ${v}`;
+      });
+      defExpr = `{ ${parts.join(', ')} }`;
+    } else {
+      defExpr = table.outputs[0].defaultText
+        ? feelExpr(table.outputs[0].defaultText, allNames, cctx)
+        : 'null';
+    }
+    lines.push(
+      `    if (__matches.length === 0) { __matches.push(${defExpr}); }`,
+    );
+  }
   lines.push(
     ...emitHitPolicyTail(
       table.hitPolicy,
@@ -645,8 +669,31 @@ function emitContextValue(
   const lines: string[] = [];
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
+  // Extend signatures with any context-defined functions so calls like
+  // `boxedFnDefinition(b: x, a: y)` can resolve their named args.
+  const localCctx: CompileContext = {
+    signatures: { ...cctx.signatures },
+  };
   for (const e of context.entries) {
-    const body = emitContextEntryBody(e, localNames, cctx);
+    if (!e.name) continue;
+    if (e.functionParameters) {
+      localCctx.signatures[e.name] = e.functionParameters.map((p) => p.name);
+      continue;
+    }
+    // Detect inline `function(a, b) ...` lambdas in literal entries and
+    // capture their parameter names so named-arg calls resolve.
+    const text = (e.bodyText ?? '').trim();
+    const fnMatch = /^function\s*\(([^)]*)\)/.exec(text);
+    if (fnMatch) {
+      const params = fnMatch[1]
+        .split(',')
+        .map((p) => p.trim().split(':')[0].trim())
+        .filter((p) => p.length > 0);
+      if (params.length) localCctx.signatures[e.name] = params;
+    }
+  }
+  for (const e of context.entries) {
+    const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {
@@ -695,10 +742,31 @@ function emitContextFn(
   // Each entry's body may reference earlier entries by name. Extend the
   // visible-name list as we go so the FEEL tokenizer recognizes them.
   const localNames: string[] = [...allNames];
+  const localCctx: CompileContext = {
+    signatures: { ...cctx.signatures },
+  };
+  for (const e of context.entries) {
+    if (!e.name) continue;
+    if (e.functionParameters) {
+      localCctx.signatures[e.name] = e.functionParameters.map((p) => p.name);
+      continue;
+    }
+    // Detect inline `function(a, b) ...` lambdas in literal entries and
+    // capture their parameter names so named-arg calls resolve.
+    const text = (e.bodyText ?? '').trim();
+    const fnMatch = /^function\s*\(([^)]*)\)/.exec(text);
+    if (fnMatch) {
+      const params = fnMatch[1]
+        .split(',')
+        .map((p) => p.trim().split(':')[0].trim())
+        .filter((p) => p.length > 0);
+      if (params.length) localCctx.signatures[e.name] = params;
+    }
+  }
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
   for (const e of context.entries) {
-    const body = emitContextEntryBody(e, localNames, cctx);
+    const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {

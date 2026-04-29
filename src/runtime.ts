@@ -12,14 +12,20 @@ export const feel: any = {
     return !a;
   },
   and(a: any, b: any): any {
+    // Three-valued logic, strictly typed: non-boolean operands → null
+    // (except when the other side short-circuits to false).
     if (a === false || b === false) return false;
-    if (a == null || b == null) return null;
-    return Boolean(a) && Boolean(b);
+    if (a !== true && a !== null) return null;
+    if (b !== true && b !== null) return null;
+    if (a === null || b === null) return null;
+    return true;
   },
   or(a: any, b: any): any {
     if (a === true || b === true) return true;
-    if (a == null || b == null) return null;
-    return Boolean(a) || Boolean(b);
+    if (a !== false && a !== null) return null;
+    if (b !== false && b !== null) return null;
+    if (a === null || b === null) return null;
+    return false;
   },
   // ---- Duration / date helpers (used by add/sub/mul/div) ----
   // Years-and-months duration → total months; null if not Y/M-only.
@@ -424,17 +430,27 @@ export const feel: any = {
     }
     return s / items.length;
   },
-  all(list: any): any {
-    list = feel.asList(list) as any;
-    if (!Array.isArray(list)) return null;
-    for (const x of list) if (x !== true) return x === false ? false : null;
-    return true;
-  },
-  any(list: any): any {
-    list = feel.asList(list) as any;
-    if (!Array.isArray(list)) return null;
+  all(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items)) return null;
     let sawNull = false;
-    for (const x of list) {
+    for (const x of items) {
+      if (x === false) return false;
+      if (x !== true) sawNull = true;
+    }
+    return sawNull ? null : true;
+  },
+  any(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items)) return null;
+    let sawNull = false;
+    for (const x of items) {
       if (x === true) return true;
       if (x !== false) sawNull = true;
     }
@@ -714,12 +730,16 @@ export const feel: any = {
     const durMatch = /^(-?)P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.\d+)?S)?)?$/.exec(s);
     if (durMatch) {
       const sign = durMatch[1] === '-' ? -1 : 1;
-      if (key === 'years') return sign * Number(durMatch[2] || 0);
-      if (key === 'months') return sign * Number(durMatch[3] || 0);
-      if (key === 'days') return sign * Number(durMatch[4] || 0);
-      if (key === 'hours') return sign * Number(durMatch[5] || 0);
-      if (key === 'minutes') return sign * Number(durMatch[6] || 0);
-      if (key === 'seconds') return sign * Number(durMatch[7] || 0);
+      const isYM = !durMatch[4] && !durMatch[5] && !durMatch[6] && !durMatch[7];
+      const isDT = !durMatch[2] && !durMatch[3];
+      // Years-and-months and days-and-time durations expose disjoint property
+      // sets. Cross-type access returns null per DMN spec evolution.
+      if (key === 'years') return isDT ? null : sign * Number(durMatch[2] || 0);
+      if (key === 'months') return isDT ? null : sign * Number(durMatch[3] || 0);
+      if (key === 'days') return isYM ? null : sign * Number(durMatch[4] || 0);
+      if (key === 'hours') return isYM ? null : sign * Number(durMatch[5] || 0);
+      if (key === 'minutes') return isYM ? null : sign * Number(durMatch[6] || 0);
+      if (key === 'seconds') return isYM ? null : sign * Number(durMatch[7] || 0);
       return null;
     }
     return null;
@@ -737,6 +757,7 @@ export const feel: any = {
     return 1 + Math.round(((target.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7);
   },
   string_length(s: any): any {
+    s = feel.singleton(s);
     return typeof s === 'string' ? s.length : null;
   },
   substring(s: any, start: any, length?: any): any {
@@ -758,9 +779,11 @@ export const feel: any = {
     return i < 0 ? '' : s.slice(i + sub.length);
   },
   upper_case(s: any): any {
+    s = feel.singleton(s);
     return typeof s === 'string' ? s.toUpperCase() : null;
   },
   lower_case(s: any): any {
+    s = feel.singleton(s);
     return typeof s === 'string' ? s.toLowerCase() : null;
   },
   contains(s: any, sub: any): any {
@@ -883,6 +906,40 @@ export const feel: any = {
   is_defined(v: any): any {
     return v !== undefined;
   },
+  // FEEL range(s) — string-form range constructor (DMN 1.5).
+  range_fn(s: any): any {
+    if (typeof s !== 'string') return null;
+    const m = /^([\[\(\]])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])$/.exec(s);
+    if (!m) return null;
+    const opener = m[1];
+    const closer = m[4];
+    const parse = (x: string): any => {
+      const t = x.trim();
+      if (t === 'null') return null;
+      if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+      if (/^"/.test(t) && /"$/.test(t)) {
+        try {
+          return JSON.parse(t);
+        } catch {
+          return null;
+        }
+      }
+      if (t.startsWith('@"') && t.endsWith('"')) {
+        return t.slice(2, -1);
+      }
+      return null;
+    };
+    const lo = parse(m[2]);
+    const hi = parse(m[3]);
+    if (lo === undefined || hi === undefined) return null;
+    return {
+      __feel: 'range',
+      lo,
+      hi,
+      openLow: opener === '(' || opener === ']',
+      openHigh: closer === ')' || closer === '[',
+    };
+  },
   // FEEL is(a,b) — strict same-value-and-type test.
   is_fn(a: any, b: any): any {
     if (a === null && b === null) return true;
@@ -919,11 +976,24 @@ export const feel: any = {
       case 'Any':
       case 'any':
         return true;
+      case 'function':
+        return typeof v === 'function';
+      case 'range':
+        return (
+          (typeof v === 'object' && (v as any).__feel === 'range') ||
+          Array.isArray(v)
+        );
       default:
-        return null;
+        // Unknown / user-defined type. Per FEEL TCK convention return false
+        // when the value clearly doesn't fit; can't validate user types.
+        return false;
     }
   },
-  date(...args: any[]): any {
+  date(..._args: any[]): any {
+    // Multi-arity: `date(s)` or `date(y, m, d)`. Named-arg calls may pad
+    // leading slots with `undefined`; strip those.
+    const args = _args.slice();
+    while (args.length && args[0] === undefined) args.shift();
     const isLeap = (y: number) =>
       (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
     const daysIn = (y: number, m: number) => {
@@ -965,12 +1035,22 @@ export const feel: any = {
     }
     return null;
   },
-  time(...args: any[]): any {
+  time(..._args: any[]): any {
+    const args = _args.slice();
+    while (args.length && args[0] === undefined) args.shift();
     const fmtTime = (h: number, m: number, s: number, frac?: string, tz?: string): string | null => {
       if (![h, m, s].every(Number.isFinite)) return null;
       if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s >= 60) return null;
+      // Validate explicit `+HH:MM` / `-HH:MM` offsets (range ±14:00).
+      if (tz && tz !== 'Z' && !tz.startsWith('@')) {
+        const tzM = /^([+-])(\d{2}):(\d{2})$/.exec(tz);
+        if (tzM) {
+          const oH = Number(tzM[2]);
+          const oM = Number(tzM[3]);
+          if (oH > 14 || oM > 59) return null;
+        }
+      }
       const head = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-      // Canonicalize +00:00 / -00:00 to Z; preserve other offsets and IANA zones.
       const tzNorm = tz === '+00:00' || tz === '-00:00' ? 'Z' : tz;
       return head + (frac ?? '') + (tzNorm ?? '');
     };
@@ -991,7 +1071,9 @@ export const feel: any = {
     }
     return null;
   },
-  date_and_time(...args: any[]): any {
+  date_and_time(..._args: any[]): any {
+    const args = _args.slice();
+    while (args.length && args[0] === undefined) args.shift();
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;

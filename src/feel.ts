@@ -136,9 +136,12 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   decimal: ['n', 'scale'],
   number: ['from'],
   string: ['from'],
-  date: ['from'],
-  time: ['from'],
-  'date and time': ['from'],
+  // Multi-arity constructors: signature is the union of all named-param
+  // forms, with leading slots padded as `undefined` when the call uses a
+  // later form. The runtime strips those at call time.
+  date: ['from', 'year', 'month', 'day'],
+  time: ['from', 'hour', 'minute', 'second', 'offset'],
+  'date and time': ['from', 'date', 'time'],
   duration: ['from'],
   'years and months duration': ['from', 'to'],
   'insert before': ['list', 'position', 'newItem'],
@@ -159,6 +162,7 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   'week of year': ['date'],
   'list replace': ['list', 'position', 'newItem'],
   is: ['value1', 'value2'],
+  range: ['from'],
 };
 
 // Builtin FEEL function names (multi-word ones must be in the names list so the
@@ -229,6 +233,7 @@ export const FEEL_BUILTINS: Record<string, string> = {
   'week of year': 'week_of_year',
   'list replace': 'list_replace',
   is: 'is_fn',
+  range: 'range_fn',
 };
 
 // All parameter names referenced by FEEL_BUILTIN_PARAMS, flattened — these must
