@@ -1083,6 +1083,14 @@ export interface CompileContext {
   // Free identifier references then fall back to property access on the
   // current `item`, per FEEL filter scope rules.
   inFilterScope?: boolean;
+  // FEEL-name → JS-ident remap for context-entry locals that don't share
+  // the canonical `toJsIdent` name (e.g. when the entry name shadows a
+  // module-level binding like a BKM or decision service).
+  localBindings?: Record<string, string>;
+  // Module-scope names (BKMs, decision services, decisions). When a context
+  // entry's name collides with one of these, the local is given a different
+  // JS ident to avoid TDZ shadowing of the module function.
+  moduleScopeNames?: Set<string>;
 }
 
 const DEFAULT_CTX: CompileContext = { signatures: {} };
@@ -1151,6 +1159,10 @@ function referencesName(node: FeelNode, name: string): boolean {
 }
 
 function emitIdent(name: string, ctx?: CompileContext): string {
+  // Local context-entry rebinding wins (e.g. when the entry name shadows
+  // a module-scope BKM/service of the same name).
+  const remapped = ctx?.localBindings?.[name];
+  if (remapped) return remapped;
   // Inside a filter predicate, an unqualified name should prefer a property
   // of the iterated item over a same-named builtin (e.g. `number` is both
   // a builtin function and a common context field).

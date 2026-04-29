@@ -562,7 +562,12 @@ function buildCompileContext(model: DmnModel): CompileContext {
   const collectionTypes = new Set(
     model.itemDefinitions.filter((it) => it.isCollection).map((it) => it.name),
   );
-  return { signatures, validatableTypes, collectionTypes };
+  const moduleScopeNames = new Set<string>([
+    ...model.bkms.map((b) => b.name),
+    ...model.decisionServices.map((s) => s.name),
+    ...model.decisions.map((d) => d.name),
+  ]);
+  return { signatures, validatableTypes, collectionTypes, moduleScopeNames };
 }
 
 // Build a JS-source literal describing the model's user-defined types
@@ -931,7 +936,9 @@ function emitContextValue(
   // Extend signatures with any context-defined functions so calls like
   // `boxedFnDefinition(b: x, a: y)` can resolve their named args.
   const localCctx: CompileContext = {
+    ...cctx,
     signatures: { ...cctx.signatures },
+    localBindings: { ...(cctx.localBindings ?? {}) },
   };
   for (const e of context.entries) {
     if (!e.name) continue;
@@ -939,8 +946,6 @@ function emitContextValue(
       localCctx.signatures[e.name] = e.functionParameters.map((p) => p.name);
       continue;
     }
-    // Detect inline `function(a, b) ...` lambdas in literal entries and
-    // capture their parameter names so named-arg calls resolve.
     const text = (e.bodyText ?? '').trim();
     const fnMatch = /^function\s*\(([^)]*)\)/.exec(text);
     if (fnMatch) {
@@ -951,23 +956,27 @@ function emitContextValue(
       if (params.length) localCctx.signatures[e.name] = params;
     }
   }
+  const chooseIdent = (i: number, name: string): string => {
+    const base = toJsIdent(name);
+    if (cctx.moduleScopeNames?.has(name)) {
+      return `__local_${i}_${base}`;
+    }
+    return base;
+  };
   for (let i = 0; i < context.entries.length; i++) {
     const e = context.entries[i];
     const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
-      const ident = toJsIdent(e.name);
+      const ident = chooseIdent(i, e.name);
       if (declared.has(ident)) {
         lines.push(`    ${ident} = ${body};`);
       } else {
-        // Temp-then-let: lets the RHS reference any outer binding sharing
-        // this name (BKM, decision service) without TDZ errors.
-        const tmp = `__ce_${i}`;
-        lines.push(`    const ${tmp}: any = ${body};`);
-        lines.push(`    let ${ident}: any = ${tmp};`);
+        lines.push(`    let ${ident}: any = ${body};`);
         declared.add(ident);
       }
       namedKeys.push({ dmnName: e.name, ident });
       if (!localNames.includes(e.name)) localNames.push(e.name);
+      localCctx.localBindings![e.name] = ident;
     } else {
       finalReturn = body;
     }
@@ -1004,10 +1013,15 @@ function emitContextFn(
   }
 
   // Each entry's body may reference earlier entries by name. Extend the
-  // visible-name list as we go so the FEEL tokenizer recognizes them.
+  // visible-name list as we go so the FEEL tokenizer recognizes them, and
+  // when the entry name shadows a module-scope binding (BKM, decision,
+  // decision service) use a prefixed local ident so the JS `let` doesn't
+  // put the module-scope reference into TDZ.
   const localNames: string[] = [...allNames];
   const localCctx: CompileContext = {
+    ...cctx,
     signatures: { ...cctx.signatures },
+    localBindings: { ...(cctx.localBindings ?? {}) },
   };
   for (const e of context.entries) {
     if (!e.name) continue;
@@ -1015,8 +1029,6 @@ function emitContextFn(
       localCctx.signatures[e.name] = e.functionParameters.map((p) => p.name);
       continue;
     }
-    // Detect inline `function(a, b) ...` lambdas in literal entries and
-    // capture their parameter names so named-arg calls resolve.
     const text = (e.bodyText ?? '').trim();
     const fnMatch = /^function\s*\(([^)]*)\)/.exec(text);
     if (fnMatch) {
@@ -1029,24 +1041,29 @@ function emitContextFn(
   }
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
+  const chooseIdent = (i: number, name: string): string => {
+    const base = toJsIdent(name);
+    if (cctx.moduleScopeNames?.has(name)) {
+      return `__local_${i}_${base}`;
+    }
+    return base;
+  };
   for (let i = 0; i < context.entries.length; i++) {
     const e = context.entries[i];
     const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
-      const ident = toJsIdent(e.name);
+      const ident = chooseIdent(i, e.name);
       if (declared.has(ident)) {
         lines.push(`    ${ident} = ${body};`);
       } else {
-        // Compute the value into a temp first so the RHS can reference any
-        // outer binding (BKM, decision service) of the same name without
-        // hitting `let`'s temporal dead zone.
-        const tmp = `__ce_${i}`;
-        lines.push(`    const ${tmp}: any = ${body};`);
-        lines.push(`    let ${ident}: any = ${tmp};`);
+        lines.push(`    let ${ident}: any = ${body};`);
         declared.add(ident);
       }
       namedKeys.push({ dmnName: e.name, ident });
       if (!localNames.includes(e.name)) localNames.push(e.name);
+      // Register the binding so subsequent entries' FEEL emit resolves the
+      // entry name to this local rather than the module-scope function.
+      localCctx.localBindings![e.name] = ident;
     } else {
       finalReturn = body;
     }
