@@ -565,10 +565,13 @@ export const feel: any = {
           if (opts?.noSingleton) return null;
           v = [v];
         }
+        // List-element validation: recurse, allowing the singleton-list
+        // rule again at this nested level (so a list-of-lists tolerates
+        // scalar elements via auto-wrap).
         if (def.base) {
           for (const item of v) {
             if (item === null) continue;
-            if (feel.validate(item, def.base, itemDefs, { noSingleton: true }) === null) return null;
+            if (feel.validate(item, def.base, itemDefs) === null) return null;
           }
         }
         return v;
