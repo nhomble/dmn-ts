@@ -966,7 +966,9 @@ export const feel: any = {
     let out = '';
     for (const c of s) {
       if (c === 'i' || c === 'm' || c === 's') out += c;
-      else if (c === 'x') return null; // handled at pattern level
+      else if (c === 'x') {
+        /* handled at pattern level */
+      }
     }
     return out;
   },
@@ -1393,7 +1395,15 @@ export const feel: any = {
         const d = feel.date(a);
         return d ? `${d}T00:00:00` : null;
       }
-      const m = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}|@[A-Za-z_+\-/]+)?)$/.exec(a);
+      // Normalize T24:00:00 (end-of-day) to T00:00:00 on the next calendar day.
+      let normalized = a;
+      const eod = /^(-?\d{4,9}-\d{2}-\d{2})T24:00:00((?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?)$/.exec(a);
+      if (eod) {
+        const next = feel.add_date_duration(eod[1], 'P1D');
+        if (!next) return null;
+        normalized = `${next}T00:00:00${eod[2]}`;
+      }
+      const m = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?)$/.exec(normalized);
       if (!m) return null;
       const d = feel.date(m[1]);
       const t = feel.time(m[2]);
