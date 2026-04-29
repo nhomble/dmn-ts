@@ -576,7 +576,13 @@ function buildCompileContext(model: DmnModel): CompileContext {
     ...model.decisionServices.map((s) => s.name),
     ...model.decisions.map((d) => d.name),
   ]);
-  return { signatures, validatableTypes, collectionTypes, moduleScopeNames };
+  return {
+    signatures,
+    validatableTypes,
+    collectionTypes,
+    moduleScopeNames,
+    dmnVersion: model.dmnVersion,
+  };
 }
 
 // Build a JS-source literal describing the model's user-defined types

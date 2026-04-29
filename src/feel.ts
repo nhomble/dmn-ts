@@ -1107,6 +1107,10 @@ export interface CompileContext {
   // entry's name collides with one of these, the local is given a different
   // JS ident to avoid TDZ shadowing of the module function.
   moduleScopeNames?: Set<string>;
+  // DMN spec version of the source model. A few semantics are version-gated:
+  // duplicate-key context literals were valid in 1.1/1.2 (last wins) and
+  // became errors in 1.3+ (DMN14-178).
+  dmnVersion?: '1.1' | '1.2' | '1.3' | '1.4' | '1.5' | 'unknown';
 }
 
 const DEFAULT_CTX: CompileContext = { signatures: {} };
@@ -1287,13 +1291,25 @@ export function emitFeelNode(
     case 'list':
       return `[${node.items.map((i) => emitFeelNode(i, ctx)).join(', ')}]`;
     case 'context': {
+      // DMN14-178 (DMN 1.3+): duplicate context-entry keys are an error.
+      // Earlier versions silently let later entries overwrite earlier ones.
+      const seen = new Set<string>();
+      let hasDup = false;
+      for (const e of node.entries) {
+        if (seen.has(e.key)) {
+          hasDup = true;
+          break;
+        }
+        seen.add(e.key);
+      }
+      const isDmn13Plus =
+        ctx?.dmnVersion === '1.3' ||
+        ctx?.dmnVersion === '1.4' ||
+        ctx?.dmnVersion === '1.5';
+      if (hasDup && isDmn13Plus) return 'null';
       // Each entry's value can reference earlier entries by name. Emit a
       // function-scoped block where the key becomes a `let` for backward
       // references AND we collect the values into the returned object.
-      // Use a per-entry temp ident so duplicate keys / non-ident keys
-      // don't break JS scoping; assign to the named local for any key
-      // that is a valid JS ident (only the first declaration; subsequent
-      // duplicates reassign).
       const lines: string[] = [];
       const props: string[] = [];
       const declared = new Set<string>();
