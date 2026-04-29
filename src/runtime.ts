@@ -1966,6 +1966,29 @@ export const feel: any = {
   },
   instance_of(v: any, typeName: string, itemDefs?: any, typeArgs?: string): any {
     if (v == null) return false;
+    // Allow callers to pass `name<args>` as a single string — split off
+    // the args here so recursive calls don't have to do the parsing.
+    if (typeArgs == null && typeName.includes('<')) {
+      const lt = typeName.indexOf('<');
+      const inner = typeName.slice(lt);
+      // Strip the matching trailing `>`.
+      let depth = 0;
+      let end = -1;
+      for (let i = 0; i < inner.length; i++) {
+        if (inner[i] === '<') depth++;
+        else if (inner[i] === '>') {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end > 0) {
+        typeArgs = inner.slice(1, end).trim();
+        typeName = typeName.slice(0, lt).trim();
+      }
+    }
     const local = typeName.includes(':') ? typeName.split(':').pop() : typeName;
     // Generic-shape checks: `list<T>` requires every element to be a T;
     // `context<a: T, b: U>` requires the value to be a context with each
