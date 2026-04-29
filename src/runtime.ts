@@ -1048,18 +1048,25 @@ export const feel: any = {
     return Math.sqrt(v);
   },
   mode(...args: any[]): any {
+    // Single null arg → null (per FEEL: null is not a list).
+    if (args.length === 1 && args[0] === null) return null;
     const items =
       args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
         ? (feel.asList(args[0]) as any[])
         : args;
-    if (!Array.isArray(items) || items.length === 0) return null;
+    if (!Array.isArray(items)) return null;
+    if (items.length === 0) return [];
+    // Numbers only — non-numeric items disqualify the call.
+    for (const x of items) {
+      if (typeof x !== 'number' || !Number.isFinite(x)) return null;
+    }
     const counts = new Map<any, number>();
     for (const x of items) counts.set(x, (counts.get(x) ?? 0) + 1);
     let max = 0;
     for (const v of counts.values()) if (v > max) max = v;
     const modes: any[] = [];
     for (const [k, v] of counts) if (v === max) modes.push(k);
-    return modes.sort();
+    return modes.sort((a, b) => a - b);
   },
   sort(list: any, precedes: any): any {
     list = feel.asList(list) as any;
@@ -1528,15 +1535,17 @@ export const feel: any = {
     if (args.length === 3) {
       const [s, group, dec] = args;
       if (typeof s !== 'string') return null;
-      if (typeof dec !== 'string') return null;
       if (group != null && typeof group !== 'string') return null;
-      // FEEL: separators must differ if both present
-      if (group && group === dec) return null;
-      // Allowed groups: space, period, comma, '⁠ ' etc — TCK only validates basic
-      // patterns. Reject if grouping appears after the decimal.
+      if (dec != null && typeof dec !== 'string') return null;
+      // Default decimal separator is `.` when the caller passes null.
+      const decSep = typeof dec === 'string' ? dec : '.';
+      // FEEL: separators must differ if both are non-null
+      if (group && decSep && group === decSep) return null;
       let str = s;
       if (group) str = str.split(group).join('');
-      if (dec !== '.') str = str.split(dec).join('.');
+      if (decSep !== '.') str = str.split(decSep).join('.');
+      // After substitutions only digits, sign, single decimal, exponent allowed.
+      if (!/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(str)) return null;
       const n = Number(str);
       return Number.isFinite(n) ? n : null;
     }
