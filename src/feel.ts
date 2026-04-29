@@ -1140,6 +1140,11 @@ export interface CompileContext {
   // Map from input-data name to its declared typeRef. Used by the decision
   // prelude to validate inputs at the boundary.
   inputDataTypes?: Map<string, string>;
+  // Names known to be in the current JS scope (input data, decisions,
+  // BKMs, lambda parameters, context-entry locals, etc.). When a name is
+  // in scope it wins over a same-named FEEL builtin during identifier
+  // emission — common collisions: `product`, `count`, `number`.
+  inScopeNames?: Set<string>;
 }
 
 const DEFAULT_CTX: CompileContext = { signatures: {} };
@@ -1222,6 +1227,9 @@ function emitIdent(name: string, ctx?: CompileContext): string {
     const ident = toJsIdent(name);
     return `((item != null && typeof item === 'object' && ${key} in (item as any)) ? feel.prop(item, ${key}) : (typeof ${ident} !== 'undefined' ? ${ident} : null))`;
   }
+  // A name that's in scope wins over a same-named builtin — `product`,
+  // `count`, `number` are common parameter names that also name builtins.
+  if (ctx?.inScopeNames?.has(name)) return toJsIdent(name);
   if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
   return toJsIdent(name);
 }
@@ -1475,7 +1483,11 @@ export function compileFeel(
   const tokens = tokenize(text, knownNames);
   const parser = new Parser(tokens);
   const ast = parser.parse();
-  return emitFeelNode(ast, ctx);
+  // Thread the in-scope names into emit context so identifier emission
+  // prefers a JS local over a same-named FEEL builtin (e.g. `product`,
+  // `number`, `count` are common parameter names that also name builtins).
+  const inScopeNames = new Set(knownNames);
+  return emitFeelNode(ast, { ...ctx, inScopeNames });
 }
 
 // Reads src/runtime.ts (the source-of-truth) at runtime so the tool can copy
