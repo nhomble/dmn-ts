@@ -550,6 +550,7 @@ export const feel: any = {
     return s / items.length;
   },
   all(...args: any[]): any {
+    if (args.length === 0) return null;
     const items =
       args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
         ? (feel.asList(args[0]) as any[])
@@ -563,6 +564,7 @@ export const feel: any = {
     return sawNull ? null : true;
   },
   any(...args: any[]): any {
+    if (args.length === 0) return null;
     const items =
       args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
         ? (feel.asList(args[0]) as any[])
@@ -1069,9 +1071,19 @@ export const feel: any = {
   },
   decimal(n: any, scale: any): any {
     if (n == null || scale == null) return null;
-    const s = Number(scale);
+    if (typeof n !== 'number' || typeof scale !== 'number') return null;
+    if (!Number.isFinite(n) || !Number.isFinite(scale)) return null;
+    const s = Math.trunc(scale);
     const f = Math.pow(10, s);
-    return Math.round(Number(n) * f) / f;
+    // FEEL uses round-half-to-even (banker's rounding) per BigDecimal default.
+    const x = n * f;
+    const floored = Math.floor(x);
+    const diff = x - floored;
+    let rounded: number;
+    if (diff < 0.5) rounded = floored;
+    else if (diff > 0.5) rounded = floored + 1;
+    else rounded = floored % 2 === 0 ? floored : floored + 1;
+    return rounded / f;
   },
   number(...args: any[]): any {
     if (args.length === 1) {
