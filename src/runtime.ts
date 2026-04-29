@@ -96,6 +96,23 @@ export const feel: any = {
     if (typeof v !== 'string') return false;
     return /^-?\d{4,9}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?/.test(v);
   },
+  is_time(v: any): boolean {
+    return typeof v === 'string' && /^\d{2}:\d{2}:\d{2}/.test(v) && !v.includes('T');
+  },
+  add_time_duration(t: any, dur: any): any {
+    if (typeof t !== 'string' || typeof dur !== 'string') return null;
+    const m = /^(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?$/.exec(t);
+    if (!m) return null;
+    const sec = feel.dt_to_seconds(dur);
+    if (sec == null) return null;
+    let total = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + sec;
+    // Wrap into [0, 86400)
+    total = ((total % 86400) + 86400) % 86400;
+    const h = Math.floor(total / 3600);
+    const mi = Math.floor((total % 3600) / 60);
+    const s = total - h * 3600 - mi * 60;
+    return feel.time(h, mi, s, m[5] ?? null);
+  },
   add(a: any, b: any): any {
     if (a == null || b == null) return null;
     if (feel.is_duration(a) && feel.is_duration(b)) {
@@ -110,6 +127,12 @@ export const feel: any = {
     }
     if (feel.is_date_or_dt(b) && feel.is_duration(a)) {
       return feel.add_date_duration(b, a);
+    }
+    if (feel.is_time(a) && feel.is_duration(b)) {
+      return feel.add_time_duration(a, b);
+    }
+    if (feel.is_time(b) && feel.is_duration(a)) {
+      return feel.add_time_duration(b, a);
     }
     // FEEL: same-type strict; cross-type → null. Plain string + plain string
     // is concat; duration/date strings are excluded above.
@@ -141,6 +164,10 @@ export const feel: any = {
     }
     if (feel.is_date_or_dt(a) && feel.is_date_or_dt(b)) {
       return feel.diff_dates(a, b);
+    }
+    if (feel.is_time(a) && feel.is_duration(b)) {
+      const negated = b.startsWith('-') ? b.slice(1) : '-' + b;
+      return feel.add_time_duration(a, negated);
     }
     if (typeof a !== 'number' || typeof b !== 'number') return null;
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
@@ -1488,9 +1515,17 @@ export const feel: any = {
     const fracDigits = m[8] ? m[8].replace(/0+$/, '') : '';
     // If the input only carries years/months (no day/time), emit the
     // years-and-months canonical form via ym_format.
-    // If the input only carries years/months (no day/time), emit the
-    // years-and-months canonical form via ym_format.
-    if ((y || mo) && !d && !h && !mi && !sec && !fracDigits) {
+    // Classify by the presence of capture groups in the input string, not
+    // their parsed numeric values — `P0M` and `P0Y` are years-and-months
+    // (even though both components are zero) and should round-trip as YM.
+    const hasY = m[2] !== undefined;
+    const hasMo = m[3] !== undefined;
+    const hasD = m[4] !== undefined;
+    const hasH = m[5] !== undefined;
+    const hasMi = m[6] !== undefined;
+    const hasS = m[7] !== undefined;
+    const isYmOnly = (hasY || hasMo) && !hasD && !hasH && !hasMi && !hasS;
+    if (isYmOnly) {
       const totalMonths = (sign === '-' ? -1 : 1) * (y * 12 + mo);
       return feel.ym_format(totalMonths);
     }
