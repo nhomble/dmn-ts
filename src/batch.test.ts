@@ -32,6 +32,33 @@ interface CaseRecord {
   results: TestResult[];
   passed: number;
   failed: number;
+  // When set, the case matched an entry in `tck-ignore.json`. Its
+  // transpile errors and failed assertions are tracked as informational
+  // but excluded from the CI exit-code calculation.
+  ignoredReason?: string;
+}
+
+interface IgnoreEntry {
+  match: string;
+  reason: string;
+}
+
+function loadIgnoreList(): IgnoreEntry[] {
+  const path = resolve(TOOL_ROOT, 'tck-ignore.json');
+  if (!existsSync(path)) return [];
+  try {
+    const cfg = JSON.parse(readFileSync(path, 'utf8'));
+    return Array.isArray(cfg.cases) ? cfg.cases : [];
+  } catch {
+    return [];
+  }
+}
+
+function matchIgnore(name: string, ignores: IgnoreEntry[]): string | undefined {
+  for (const e of ignores) {
+    if (name.includes(e.match)) return e.reason;
+  }
+  return undefined;
 }
 
 function findCaseDirs(root: string): string[] {
@@ -100,7 +127,11 @@ async function main(): Promise<void> {
   }
 
   const caseDirs = findCaseDirs(tckRoot);
-  console.log(`found ${caseDirs.length} case(s) under ${tckRoot}`);
+  const ignoreList = loadIgnoreList();
+  console.log(
+    `found ${caseDirs.length} case(s) under ${tckRoot}` +
+      (ignoreList.length ? ` (ignore list: ${ignoreList.length} entr${ignoreList.length === 1 ? 'y' : 'ies'})` : ''),
+  );
 
   if (existsSync(outDir)) rmSync(outDir, { recursive: true });
   mkdirSync(join(outDir, 'cases'), { recursive: true });
@@ -122,6 +153,7 @@ async function main(): Promise<void> {
       results: [],
       passed: 0,
       failed: 0,
+      ignoredReason: matchIgnore(slug, ignoreList),
     };
     if (!dmnPath) {
       rec.transpileError = 'no .dmn file found';
@@ -215,12 +247,17 @@ async function main(): Promise<void> {
     if (loadError) rec.loadError = loadError;
   }
 
+  const active = records.filter((r) => !r.ignoredReason);
+  const ignored = records.filter((r) => r.ignoredReason);
   const totalPassed = records.reduce((s, r) => s + r.passed, 0);
   const totalFailed = records.reduce((s, r) => s + r.failed, 0);
   const total = totalPassed + totalFailed;
+  // Active = not on the ignore list. Only these contribute to the exit code.
+  const activeFailed = active.reduce((s, r) => s + r.failed, 0);
   const fullyPassing = records.filter((r) => r.failed === 0 && r.passed > 0).length;
-  const transpileFailed = records.filter((r) => r.transpileError).length;
-  const loadFailed = records.filter((r) => r.loadError).length;
+  const transpileFailed = active.filter((r) => r.transpileError).length;
+  const loadFailed = active.filter((r) => r.loadError).length;
+  const ignoredTests = ignored.reduce((s, r) => s + r.passed + r.failed, 0);
 
   writeFileSync(
     join(outDir, 'report.json'),
@@ -232,9 +269,11 @@ async function main(): Promise<void> {
           casesFullyPassing: fullyPassing,
           casesTranspileFailed: transpileFailed,
           casesLoadFailed: loadFailed,
+          casesIgnored: ignored.length,
           tests: total,
           passed: totalPassed,
           failed: totalFailed,
+          testsIgnored: ignoredTests,
         },
         cases: records.map((r) => ({
           name: r.name,
@@ -242,6 +281,7 @@ async function main(): Promise<void> {
           failed: r.failed,
           transpileError: r.transpileError,
           loadError: r.loadError,
+          ignoredReason: r.ignoredReason,
           failures: r.results
             .filter((x) => x.status === 'fail')
             .slice(0, 200)
@@ -256,11 +296,18 @@ async function main(): Promise<void> {
     ) + '\n',
   );
 
+  const activePassed = totalPassed - ignored.reduce((s, r) => s + r.passed, 0);
+  const activeTotal = activePassed + activeFailed;
+
   console.log('');
-  console.log(`cases: ${fullyPassing}/${records.length} fully passing  (${transpileFailed} transpile-failed, ${loadFailed} load-failed)`);
-  console.log(`tests: ${totalPassed}/${total} passing  (${totalFailed} failures)`);
+  console.log(
+    `cases: ${fullyPassing}/${records.length} fully passing  (${transpileFailed} transpile-failed, ${loadFailed} load-failed${ignored.length ? `, ${ignored.length} ignored` : ''})`,
+  );
+  console.log(
+    `tests: ${activePassed}/${activeTotal} passing  (${activeFailed} failures${ignoredTests ? `, ${ignoredTests} on ignored cases` : ''})`,
+  );
   console.log(`report: ${join(outDir, 'report.json')}`);
-  if (totalFailed > 0) process.exit(1);
+  if (activeFailed > 0) process.exit(1);
 }
 
 await main();

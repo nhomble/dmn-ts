@@ -11,9 +11,9 @@
     "test": "npm run build && node --test dist/runtime.test.js dist/tck-values.test.js dist/type-utils.test.js dist/dmn-parse.test.js dist/dmn-emit.test.js",
     "run": "node --enable-source-maps dist/cli.js",
     "tck:run": "npm run build && node --enable-source-maps dist/harness.js",
-    "tck:1.1.cl2": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl2",
-    "tck:1.1.cl3": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck/1.1/cl3 -o out/cl3.1.1",
-    "tck:all": "npm run build && node --enable-source-maps dist/batch.test.js ../oss/jdmn/dmn-test-cases/standard/tck -o out/all"
+    "tck:1.1.cl2": "npm run build && node --enable-source-maps dist/batch.test.js tck-cases/1.1/cl2",
+    "tck:1.1.cl3": "npm run build && node --enable-source-maps dist/batch.test.js tck-cases/1.1/cl3 -o out/cl3.1.1",
+    "tck:all": "npm run build && node --enable-source-maps dist/batch.test.js tck-cases -o out/all"
   },
   "files": [
     "dist/cli.js",

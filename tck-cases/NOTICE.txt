@@ -1,0 +1,18 @@
+This directory contains DMN TCK fixtures vendored from jDMN's expanded
+test-cases tree:
+
+  https://github.com/goldmansachs/jdmn
+  Path: dmn-test-cases/standard/tck
+
+Original TCK upstream: https://github.com/dmn-tck/tck
+jDMN expands the upstream suite into per-DMN-version variants
+(1.1 / 1.2 / 1.3 / 1.4 / 1.5) so cross-version semantics can be exercised.
+We vendor that expansion to keep our pass-rate driven by the same surface.
+
+Filtering applied during vendoring:
+  - kept: *.dmn and *-test-*.xml
+  - dropped: translator/ subdirs (jDMN-internal variations we don't run),
+             *.java / *.kt / *.py / *.pdf / *.json / *.yaml artifacts
+
+License: Apache 2.0 (see LICENSE.txt). Copyright Goldman Sachs and the
+DMN TCK contributors.

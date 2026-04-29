@@ -1,0 +1,9 @@
+{
+  "_doc": "Cases listed here are still parsed and reported, but their transpile errors and failed assertions don't fail CI. Each entry must include a `reason` so the bypass is justified, not just convenient.",
+  "cases": [
+    {
+      "match": "0076-feel-external-java",
+      "reason": "FEEL `external` Java-method binding requires a JVM bridge to load classes and invoke methods — out of scope for a JS-only runtime."
+    }
+  ]
+}
