@@ -4,7 +4,11 @@
 export const feel: any = {
   neg(a: any): any {
     if (a == null) return null;
-    return -Number(a);
+    if (typeof a === 'string' && /^-?P/.test(a)) {
+      return a.startsWith('-') ? a.slice(1) : '-' + a;
+    }
+    if (typeof a === 'number') return Number.isFinite(a) ? -a : null;
+    return null;
   },
   not(a: any): any {
     if (a == null) return null;
@@ -809,6 +813,21 @@ export const feel: any = {
   },
   // Property access — handles object fields and the implicit fields exposed
   // by date/time/dateTime/duration string values (year, month, day, hour, …).
+  _tz_to_offset_dur(tz: any): any {
+    if (!tz || typeof tz !== 'string') return null;
+    if (tz === 'Z') return 'PT0S';
+    if (tz.startsWith('@')) return null;
+    const m = /^([+-])(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(tz);
+    if (!m) return null;
+    const sign = m[1] === '-' ? -1 : 1;
+    const total = sign * (Number(m[2]) * 3600 + Number(m[3]) * 60 + Number(m[4] || 0));
+    return feel.dt_format(total);
+  },
+  _tz_to_zone_name(tz: any): any {
+    if (!tz || typeof tz !== 'string') return null;
+    if (tz.startsWith('@')) return tz.slice(1);
+    return null;
+  },
   prop(obj: any, key: string): any {
     if (obj == null) return null;
     if (typeof obj === 'string') return feel.temporal_prop(obj, key);
@@ -851,7 +870,8 @@ export const feel: any = {
         if (key === 'hour') return Number(dtMatch[5]);
         if (key === 'minute') return Number(dtMatch[6]);
         if (key === 'second') return Number(dtMatch[7]);
-        if (key === 'time offset' || key === 'timezone') return dtMatch[9] || null;
+        if (key === 'time offset') return feel._tz_to_offset_dur(dtMatch[9]);
+        if (key === 'timezone') return feel._tz_to_zone_name(dtMatch[9]);
       } else {
         if (key === 'hour' || key === 'minute' || key === 'second') return 0;
         if (key === 'time offset' || key === 'timezone') return null;
@@ -863,7 +883,8 @@ export const feel: any = {
       if (key === 'hour') return Number(tMatch[1]);
       if (key === 'minute') return Number(tMatch[2]);
       if (key === 'second') return Number(tMatch[3]);
-      if (key === 'time offset' || key === 'timezone') return tMatch[5] || null;
+      if (key === 'time offset') return feel._tz_to_offset_dur(tMatch[5]);
+      if (key === 'timezone') return feel._tz_to_zone_name(tMatch[5]);
       return null;
     }
     const durMatch = /^(-?)P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.\d+)?S)?)?$/.exec(s);
@@ -937,18 +958,38 @@ export const feel: any = {
     if (typeof s !== 'string' || typeof p !== 'string') return null;
     return s.endsWith(p);
   },
-  matches(s: any, pat: any): any {
+  // Convert FEEL regex flags (XPath: i, s, m, x) to JS RegExp flags.
+  _xpath_flags(s: string): string | null {
+    let out = '';
+    for (const c of s) {
+      if (c === 'i' || c === 'm' || c === 's') out += c;
+      else if (c === 'x') return null; // handled at pattern level
+    }
+    return out;
+  },
+  _xpath_pattern(pat: string, flags: string): string {
+    return flags.includes('x')
+      ? pat.replace(/#[^\n]*/g, '').replace(/\s+/g, '')
+      : pat;
+  },
+  matches(s: any, pat: any, flags?: any): any {
     if (typeof s !== 'string' || typeof pat !== 'string') return null;
+    const f = typeof flags === 'string' ? flags : '';
+    const jsFlags = feel._xpath_flags(f) ?? '';
+    const patStr = feel._xpath_pattern(pat, f);
     try {
-      return new RegExp(pat).test(s);
+      return new RegExp(patStr, jsFlags).test(s);
     } catch {
       return null;
     }
   },
-  replace(s: any, pat: any, rep: any): any {
+  replace(s: any, pat: any, rep: any, flags?: any): any {
     if (typeof s !== 'string' || typeof pat !== 'string' || typeof rep !== 'string') return null;
+    const f = typeof flags === 'string' ? flags : '';
+    const jsFlags = (feel._xpath_flags(f) ?? '') + 'g';
+    const patStr = feel._xpath_pattern(pat, f);
     try {
-      return s.replace(new RegExp(pat, 'g'), rep);
+      return s.replace(new RegExp(patStr, jsFlags), rep);
     } catch {
       return null;
     }
@@ -1067,7 +1108,8 @@ export const feel: any = {
   // FEEL range(s) — string-form range constructor (DMN 1.5).
   range_fn(s: any): any {
     if (typeof s !== 'string') return null;
-    const m = /^([\[\(\]])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])$/.exec(s);
+    const trimmed = s.trim();
+    const m = /^([\[\(\]])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])$/.exec(trimmed);
     if (!m) return null;
     const opener = m[1];
     const closer = m[4];
@@ -1220,6 +1262,15 @@ export const feel: any = {
           if (oH > 14 || oM > 59 || oS > 59) return null;
         }
       }
+      // Validate IANA zone names against the real database.
+      if (tz && tz.startsWith('@')) {
+        const zone = tz.slice(1);
+        try {
+          new Intl.DateTimeFormat('en', { timeZone: zone });
+        } catch {
+          return null;
+        }
+      }
       // Format seconds with a leading zero on the integer part, preserving
       // any fractional component but trimming f64 noise (toFixed(9) plus
       // trailing-zero strip) so 1.3 renders as "01.3" not "01.3000…04".
@@ -1233,11 +1284,21 @@ export const feel: any = {
       }
       const head = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${sStr}`;
       const tzNorm = tz === '+00:00' || tz === '-00:00' ? 'Z' : tz;
-      return head + (frac ?? '') + (tzNorm ?? '');
+      // Strip trailing zeros from the fractional component (and the lone dot).
+      let fracOut = '';
+      if (frac) {
+        const trimmed = frac.replace(/0+$/, '');
+        fracOut = trimmed === '.' ? '' : trimmed;
+      }
+      return head + fracOut + (tzNorm ?? '');
     };
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;
+      // A pure date string → midnight UTC.
+      if (/^-?\d{4,9}-\d{2}-\d{2}$/.test(a)) {
+        return '00:00:00Z';
+      }
       // Accept a date-and-time string and extract the time portion.
       const dtTime = /T(\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)?)$/.exec(a);
       const candidate = dtTime ? dtTime[1] : a;
@@ -1264,7 +1325,8 @@ export const feel: any = {
               const abs = Math.abs(sec);
               const oh = Math.floor(abs / 3600);
               const om = Math.floor((abs % 3600) / 60);
-              tz = `${sign}${String(oh).padStart(2, '0')}:${String(om).padStart(2, '0')}`;
+              const os = Math.floor(abs % 60);
+              tz = `${sign}${String(oh).padStart(2, '0')}:${String(om).padStart(2, '0')}${os ? ':' + String(os).padStart(2, '0') : ''}`;
             }
           } else {
             return null;
