@@ -222,11 +222,12 @@ test('list_contains on open range', () => {
 });
 
 test('list_contains on null-bounded ranges', () => {
-  // (>= 10) — lo=10, hi=null
+  // FEEL: a range with a null endpoint is undefined for `in`. The TCK
+  // (0072 null_001_a etc.) treats `5 in (null..10]` as null, not true.
   const ge = feel.range(10, null, false, true);
-  assert.equal(feel.list_contains(ge, 10), true);
-  assert.equal(feel.list_contains(ge, 100), true);
-  assert.equal(feel.list_contains(ge, 9), false);
+  assert.equal(feel.list_contains(ge, 10), null);
+  assert.equal(feel.list_contains(ge, 100), null);
+  assert.equal(feel.list_contains(ge, 9), null);
 });
 
 test('list_contains recurses into nested ranges/lists', () => {
