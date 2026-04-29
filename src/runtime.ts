@@ -303,7 +303,28 @@ export const feel: any = {
         ms -= offSec * 1000;
       }
     }
+    // Note: caller must apply the IANA-zone offset separately (via
+    // `_iana_offset_min`) when needed for comparisons. Date-arithmetic call
+    // sites preserve the wall-clock text and don't want the IANA fold.
     return ms;
+  },
+  _iana_offset_min(date: any, ianaZone: any): number | null {
+    if (!(date instanceof Date) || typeof ianaZone !== 'string') return null;
+    try {
+      const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: ianaZone,
+        timeZoneName: 'longOffset',
+      });
+      const parts = fmt.formatToParts(date);
+      const offsetStr = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
+      if (offsetStr === 'GMT') return 0;
+      const m = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(offsetStr);
+      if (!m) return null;
+      const sign = m[1] === '-' ? -1 : 1;
+      return sign * (Number(m[2]) * 60 + Number(m[3] || 0));
+    } catch {
+      return null;
+    }
   },
   // Format a UTC `Date` in the requested offset (e.g. "+11:00", "Z", or "" for
   // naive output without any suffix).
@@ -374,7 +395,37 @@ export const feel: any = {
       const isTime = feel.is_time(a) && feel.is_time(b);
       const isDt =
         /^-?\d{4,9}-\d{2}-\d{2}T/.test(a) && /^-?\d{4,9}-\d{2}-\d{2}T/.test(b);
-      if (isTime || isDt) {
+      if (isDt) {
+        // Both zoned: compare instants (so `+00:00` == `@Etc/UTC`,
+        // `+02:00` == `@Europe/Paris` for a wall time inside CEST, etc.).
+        const aZoned = /T.+(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.test(a);
+        const bZoned = /T.+(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.test(b);
+        if (aZoned !== bZoned) return null;
+        if (aZoned && bZoned) {
+          const dtA = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.exec(a);
+          const dtB = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.exec(b);
+          if (dtA && dtB) {
+            const toInstant = (dateP: string, timeP: string, tz: string): number | null => {
+              const ms = feel._dt_to_utc_ms(dateP, timeP, tz);
+              if (ms == null) return null;
+              if (tz.startsWith('@')) {
+                const off = feel._iana_offset_min(new Date(ms), tz.slice(1));
+                if (off == null) return null;
+                return ms - off * 60_000;
+              }
+              return ms;
+            };
+            const msA = toInstant(dtA[1], dtA[2], dtA[3]);
+            const msB = toInstant(dtB[1], dtB[2], dtB[3]);
+            if (msA != null && msB != null) {
+              // Equality is to second resolution per TCK 1.3+.
+              return Math.floor(msA / 1000) === Math.floor(msB / 1000);
+            }
+          }
+        }
+        return a.replace(/\.\d+/, '') === b.replace(/\.\d+/, '');
+      }
+      if (isTime) {
         return a.replace(/\.\d+/, '') === b.replace(/\.\d+/, '');
       }
     }
@@ -403,7 +454,8 @@ export const feel: any = {
       return true;
     }
     if (typeof a === 'object' && typeof b === 'object') {
-      if (Array.isArray(a) !== Array.isArray(b)) return false;
+      // List vs context: cross-type → null per FEEL.
+      if (Array.isArray(a) !== Array.isArray(b)) return null;
       const ak = Object.keys(a);
       const bk = Object.keys(b);
       if (ak.length !== bk.length) return false;
@@ -1007,10 +1059,32 @@ export const feel: any = {
     if (m == null || typeof m !== 'object' || Array.isArray(m)) return null;
     return Object.entries(m).map(([key, value]) => ({ key, value }));
   },
-  context_put(context: any, key: any, value: any): any {
+  context_put(context: any, key: any, value: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (context == null || typeof context !== 'object' || Array.isArray(context)) return null;
-    if (typeof key !== 'string') return null;
-    return { ...(context as object), [key]: value };
+    // Two-arg form (context, key) is invalid — value is required.
+    if (value === undefined) return null;
+    if (typeof key === 'string') {
+      return { ...(context as object), [key]: value };
+    }
+    if (Array.isArray(key)) {
+      if (key.length === 0) return null;
+      if (!key.every((k) => typeof k === 'string')) return null;
+      // Recursive insert at the keypath, copying intermediate contexts.
+      const [head, ...tail] = key;
+      if (tail.length === 0) {
+        return { ...(context as object), [head]: value };
+      }
+      const inner = (context as Record<string, unknown>)[head];
+      const innerCtx =
+        inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+          ? inner
+          : {};
+      const updated = feel.context_put(innerCtx, tail, value);
+      if (updated === null) return null;
+      return { ...(context as object), [head]: updated };
+    }
+    return null;
   },
   context_merge(contexts: any): any {
     if (!Array.isArray(contexts)) return null;
