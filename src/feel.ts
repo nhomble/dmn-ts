@@ -124,8 +124,10 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   replace: ['input', 'pattern', 'replacement', 'flags'],
   split: ['string', 'delimiter'],
   'string join': ['list', 'delimiter'],
-  floor: ['number'],
-  ceiling: ['number'],
+  // FEEL spec uses `n` for math fns that operate on a single number;
+  // `number` for abs/even/odd specifically.
+  floor: ['n'],
+  ceiling: ['n'],
   abs: ['number'],
   modulo: ['dividend', 'divisor'],
   sqrt: ['number'],

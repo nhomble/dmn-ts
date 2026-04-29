@@ -47,7 +47,7 @@ export const feel: any = {
     if (y) body += `${y}Y`;
     if (mo) body += `${mo}M`;
     if (!body) body = '0Y';
-    return `${sign}P${body}`;
+    return `${n === 0 ? '' : sign}P${body}`;
   },
   // Days-and-time duration → total seconds (may be fractional); null otherwise.
   dt_to_seconds(s: any): any {
@@ -82,7 +82,8 @@ export const feel: any = {
       time += isInt ? `${s}S` : `${s}S`;
     }
     if (!date && !time) date = '0D';
-    return `${sign}P${date}${time ? 'T' + time : ''}`;
+    const isZero = totalSec === 0;
+    return `${isZero ? '' : sign}P${date}${time ? 'T' + time : ''}`;
   },
   is_duration(v: any): boolean {
     return typeof v === 'string' && /^-?P/.test(v);
@@ -191,31 +192,51 @@ export const feel: any = {
       );
     }
     // Date-and-time: extract date + time, manipulate, recombine.
-    const dtMatch = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/.exec(d);
+    const dtMatch = /^(-?\d{4,9}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})?$/.exec(d);
     if (dtMatch) {
+      // Preserve the source timezone suffix; if naive, treat as UTC and emit naive.
+      const tzSuffix = dtMatch[3] ?? '';
+      const dForParse = tzSuffix ? d : d + 'Z';
       const baseSec = feel.dt_to_seconds(dur);
       if (baseSec != null) {
-        // Force UTC for naive date-and-time strings (no timezone suffix).
-        const dForParse = /Z|[+-]\d{2}:\d{2}$/.test(d) ? d : d + 'Z';
         const ms = Date.parse(dForParse);
         if (!Number.isNaN(ms)) {
           const out = new Date(ms + baseSec * 1000);
-          const iso = out.toISOString().slice(0, 19);
-          return iso;
+          // Format in the original offset.
+          return feel._format_dt_with_tz(out, tzSuffix);
         }
       }
       const months = feel.ym_to_months(dur);
       if (months != null) {
-        const dForParse = /Z|[+-]\d{2}:\d{2}$/.test(d) ? d : d + 'Z';
-        const ms = Date.parse(dForParse);
-        if (!Number.isNaN(ms)) {
-          const out = new Date(ms);
-          out.setUTCMonth(out.getUTCMonth() + months);
-          return out.toISOString().slice(0, 19);
-        }
+        // Calendar math: add months on the local date component, keep time
+        // and tz untouched. Avoids the UTC-rollover bug across DST/offset.
+        const dateOnly = dtMatch[1];
+        const timeOnly = dtMatch[2];
+        const newDate = feel.add_date_duration(dateOnly, dur);
+        if (newDate) return `${newDate}T${timeOnly}${tzSuffix}`;
       }
     }
     return null;
+  },
+  // Format a UTC `Date` in the requested offset (e.g. "+11:00", "Z", or "" for
+  // naive output without any suffix).
+  _format_dt_with_tz(dt: any, tzSuffix: string): any {
+    if (!(dt instanceof Date)) return null;
+    let offsetMin = 0;
+    if (tzSuffix === 'Z') {
+      offsetMin = 0;
+    } else if (/^[+-]\d{2}:\d{2}$/.test(tzSuffix)) {
+      const sign = tzSuffix[0] === '-' ? -1 : 1;
+      offsetMin = sign * (Number(tzSuffix.slice(1, 3)) * 60 + Number(tzSuffix.slice(4, 6)));
+    }
+    const shifted = new Date(dt.getTime() + offsetMin * 60_000);
+    const y = shifted.getUTCFullYear();
+    const mo = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(shifted.getUTCDate()).padStart(2, '0');
+    const h = String(shifted.getUTCHours()).padStart(2, '0');
+    const mi = String(shifted.getUTCMinutes()).padStart(2, '0');
+    const s = String(shifted.getUTCSeconds()).padStart(2, '0');
+    return `${y}-${mo}-${d}T${h}:${mi}:${s}${tzSuffix}`;
   },
   diff_dates(a: any, b: any): any {
     if (typeof a !== 'string' || typeof b !== 'string') return null;
@@ -244,6 +265,9 @@ export const feel: any = {
   eq(a: any, b: any): any {
     if (a === null && b === null) return true;
     if (a == null || b == null) return false;
+    // Cross-type comparison → null (FEEL spec). Note: arrays and ranges are
+    // both `typeof 'object'`; the branches below disambiguate.
+    if (typeof a !== typeof b) return null;
     if (typeof a === 'number' && typeof b === 'number') {
       if (a === b) return true;
       const diff = Math.abs(a - b);
@@ -301,6 +325,40 @@ export const feel: any = {
     if (a == null || b == null) return null;
     if (typeof a === 'string' && typeof b === 'string') return a >= b;
     return Number(a) >= Number(b);
+  },
+  // Coerce a value to a declared FEEL primitive type, or null if the value
+  // doesn't match. For unknown / user-defined types, returns the value as-is
+  // (we don't have the item-definition info to validate).
+  coerce(v: any, typeRef: string): any {
+    if (v === null || v === undefined) return null;
+    const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
+    switch (local) {
+      case 'string':
+        return typeof v === 'string' ? v : null;
+      case 'number':
+        return typeof v === 'number' && Number.isFinite(v) ? v : null;
+      case 'boolean':
+        return typeof v === 'boolean' ? v : null;
+      case 'date':
+        return typeof v === 'string' && /^-?\d{4,9}-\d{2}-\d{2}$/.test(v)
+          ? v
+          : null;
+      case 'time':
+        return typeof v === 'string' &&
+          /^\d{2}:\d{2}:\d{2}/.test(v) &&
+          !v.includes('T')
+          ? v
+          : null;
+      case 'dateTime':
+      case 'date and time':
+        return typeof v === 'string' && /T/.test(v) ? v : null;
+      case 'duration':
+      case 'years and months duration':
+      case 'days and time duration':
+        return typeof v === 'string' && /^-?P/.test(v) ? v : null;
+      default:
+        return v;
+    }
   },
   // FEEL singleton-list rule: when a list of length 1 is used in a context
   // expecting a single value, unwrap to the element.
@@ -368,7 +426,10 @@ export const feel: any = {
   // `fn` is a closure that takes an `item` parameter; if it doesn't reference
   // the parameter, the value is treated as the index, otherwise as a filter.
   indexOrFilter(list: any, fn: any): any {
-    list = feel.asList(list) as any;
+    if (list === null || list === undefined) return null;
+    const asList = feel.asList(list);
+    // Per FEEL singleton rule, a scalar `value[1]` is equivalent to `[value][1]`.
+    list = asList ?? [list];
     if (!Array.isArray(list)) return null;
     let probe: any;
     let probed = true;
@@ -390,11 +451,15 @@ export const feel: any = {
     return Array.isArray(list) ? list.length : null;
   },
   sum(...args: any[]): any {
-    const items = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items) || items.length === 0) return null;
     let s = 0;
     for (const x of items) {
-      if (x == null) return null;
-      s += Number(x);
+      if (typeof x !== 'number' || !Number.isFinite(x)) return null;
+      s += x;
     }
     return s;
   },
@@ -421,12 +486,15 @@ export const feel: any = {
     return best;
   },
   mean(...args: any[]): any {
-    const items = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
-    if (items.length === 0) return null;
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items) || items.length === 0) return null;
     let s = 0;
     for (const x of items) {
-      if (x == null) return null;
-      s += Number(x);
+      if (typeof x !== 'number' || !Number.isFinite(x)) return null;
+      s += x;
     }
     return s / items.length;
   },
@@ -528,13 +596,16 @@ export const feel: any = {
     rec(list);
     return out;
   },
-  product(list: any): any {
-    list = feel.asList(list) as any;
-    if (!Array.isArray(list)) return null;
+  product(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items) || items.length === 0) return null;
     let p = 1;
-    for (const x of list) {
-      if (x == null) return null;
-      p *= Number(x);
+    for (const x of items) {
+      if (typeof x !== 'number' || !Number.isFinite(x)) return null;
+      p *= x;
     }
     return p;
   },
@@ -583,27 +654,37 @@ export const feel: any = {
     out[i - 1] = newItem;
     return out;
   },
-  median(list: any): any {
-    if (!Array.isArray(list) || list.length === 0) return null;
-    const nums = list.map(Number).sort((a, b) => a - b);
-    if (nums.some((n) => !Number.isFinite(n))) return null;
+  median(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items) || items.length === 0) return null;
+    if (items.some((n) => typeof n !== 'number' || !Number.isFinite(n))) return null;
+    const nums = items.slice().sort((a, b) => a - b);
     const mid = Math.floor(nums.length / 2);
     return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
   },
-  stddev(list: any): any {
-    if (!Array.isArray(list) || list.length < 2) return null;
-    const nums = list.map(Number);
-    if (nums.some((n) => !Number.isFinite(n))) return null;
-    const m = nums.reduce((s, x) => s + x, 0) / nums.length;
-    const v = nums.reduce((s, x) => s + (x - m) * (x - m), 0) / (nums.length - 1);
+  stddev(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items) || items.length < 2) return null;
+    if (items.some((n) => typeof n !== 'number' || !Number.isFinite(n))) return null;
+    const m = items.reduce((s, x) => s + x, 0) / items.length;
+    const v = items.reduce((s, x) => s + (x - m) * (x - m), 0) / (items.length - 1);
     return Math.sqrt(v);
   },
-  mode(list: any): any {
-    list = feel.asList(list) as any;
-    if (!Array.isArray(list)) return null;
-    if (list.length === 0) return [];
+  mode(...args: any[]): any {
+    const items =
+      args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
+        ? (feel.asList(args[0]) as any[])
+        : args;
+    if (!Array.isArray(items)) return null;
+    if (items.length === 0) return [];
     const counts = new Map<any, number>();
-    for (const x of list) counts.set(x, (counts.get(x) ?? 0) + 1);
+    for (const x of items) counts.set(x, (counts.get(x) ?? 0) + 1);
     let max = 0;
     for (const v of counts.values()) if (v > max) max = v;
     const modes: any[] = [];
@@ -675,11 +756,12 @@ export const feel: any = {
     if (obj == null) return null;
     if (typeof obj === 'string') return feel.temporal_prop(obj, key);
     if (Array.isArray(obj)) {
-      // Expanded ranges (closed-closed integer ranges) — best-effort props.
+      // Range-property fast paths (for ranges that were collapsed to arrays).
       if (key === 'start') return obj[0] ?? null;
       if (key === 'end') return obj[obj.length - 1] ?? null;
       if (key === 'start included' || key === 'end included') return true;
-      return null;
+      // FEEL "path" navigation: list.field returns the field of each element.
+      return obj.map((it: any) => feel.prop(it, key));
     }
     if (typeof obj === 'object') {
       const o = obj as Record<string, unknown>;
@@ -953,7 +1035,12 @@ export const feel: any = {
     const local = typeName.includes(':') ? typeName.split(':').pop() : typeName;
     switch (local) {
       case 'string':
-        return typeof v === 'string';
+        return (
+          typeof v === 'string' &&
+          !/^-?\d{4,9}-\d{2}-\d{2}/.test(v) &&
+          !/^\d{2}:\d{2}:\d{2}/.test(v) &&
+          !/^-?P/.test(v)
+        );
       case 'number':
         return typeof v === 'number' && Number.isFinite(v);
       case 'boolean':
@@ -1143,7 +1230,9 @@ export const feel: any = {
       time += `${sec}${fracDigits ? '.' + fracDigits : ''}S`;
     }
     if (!date && !time) time = '0S';
-    return `${sign}P${date}${time ? 'T' + time : ''}`;
+    // Drop sign when result is canonical zero.
+    const isZero = !y && !mo && !d && !h && !mi && sec === 0 && !fracDigits;
+    return `${isZero ? '' : sign}P${date}${time ? 'T' + time : ''}`;
   },
   years_and_months_duration(from: any, to: any): any {
     if (typeof from !== 'string' || typeof to !== 'string') return null;

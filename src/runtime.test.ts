@@ -52,9 +52,10 @@ test('pow: non-finite results become null', () => {
   assert.equal(feel.pow(10, 1000), null);
 });
 
-test('eq: numeric tolerance, deep object/array', () => {
+test('eq: numeric tolerance, deep object/array, cross-type → null', () => {
   assert.equal(feel.eq(0.1 + 0.2, 0.3), true);
-  assert.equal(feel.eq(1, '1'), false);
+  assert.equal(feel.eq(1, '1'), null); // cross-type → null
+  assert.equal(feel.eq(true, 1), null); // boolean vs number → null
   assert.equal(feel.eq([1, 2], [1, 2]), true);
   assert.equal(feel.eq({ a: 1 }, { a: 1 }), true);
   assert.equal(feel.eq({ a: 1 }, { a: 1, b: 2 }), false);

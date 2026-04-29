@@ -53,6 +53,7 @@ export interface DmnDecision {
   decisionTable?: DmnDecisionTable;
   context?: DmnContext;
   invocation?: DmnInvocation;
+  relation?: DmnRelation;
 }
 
 export interface DmnBkmParameter {
@@ -79,6 +80,17 @@ export interface DmnInvocationBinding {
 export interface DmnInvocation {
   fnText?: string;
   bindings: DmnInvocationBinding[];
+}
+
+export interface DmnRelationRow {
+  // One literal-expression text per column, in column order. Empty rows
+  // (or missing cells) become null in the emitted output.
+  cells: string[];
+}
+
+export interface DmnRelation {
+  columns: string[];
+  rows: DmnRelationRow[];
 }
 
 export interface DmnContextEntry {
@@ -121,6 +133,8 @@ const xmlParser = new XMLParser({
       'formalParameter',
       'contextEntry',
       'binding',
+      'column',
+      'row',
     ].includes(name),
 });
 
@@ -209,6 +223,9 @@ export function parseDmn(xml: string): DmnModel {
     const invocation: DmnInvocation | undefined = n.invocation
       ? parseInvocationXml(n.invocation)
       : undefined;
+    const relation: DmnRelation | undefined = n.relation
+      ? parseRelationXml(n.relation)
+      : undefined;
     return {
       id: n['@_id'],
       name: n['@_name'],
@@ -219,6 +236,7 @@ export function parseDmn(xml: string): DmnModel {
       decisionTable,
       context,
       invocation,
+      relation,
     };
   });
 
@@ -228,6 +246,14 @@ export function parseDmn(xml: string): DmnModel {
     decisions,
     bkms,
   };
+}
+
+function parseRelationXml(rel: any): DmnRelation {
+  const columns = arr<any>(rel.column).map((c) => c['@_name'] ?? '');
+  const rows: DmnRelationRow[] = arr<any>(rel.row).map((r) => ({
+    cells: arr<any>(r.literalExpression).map((le) => String(le?.text ?? '')),
+  }));
+  return { columns, rows };
 }
 
 function parseInvocationXml(inv: any): DmnInvocation {
@@ -815,13 +841,44 @@ function emitInvocationFn(
   });
   let expr = emitInvocationCall(inv, allNames, cctx);
   if (isScalarTypeRef(decision.typeRef)) {
-    expr = `feel.singleton(${expr})`;
+    expr = `feel.coerce(feel.singleton(${expr}), ${JSON.stringify(decision.typeRef)})`;
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...inputBindings,
     ...decisionBindings,
     `    return ${expr};`,
+    `  },`,
+  ].join('\n');
+}
+
+function emitRelationFn(
+  decision: DmnDecision,
+  rel: DmnRelation,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const inputBindings = decision.requiredInputs.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
+  });
+  const decisionBindings = decision.requiredDecisions.map((n) => {
+    const ident = toJsIdent(n);
+    return `    const ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`;
+  });
+  const items = rel.rows.map((row) => {
+    const props = rel.columns.map((col, i) => {
+      const cell = row.cells[i];
+      const v = cell ? feelExpr(cell, allNames, cctx) : 'null';
+      return `${JSON.stringify(col)}: ${v}`;
+    });
+    return `{ ${props.join(', ')} }`;
+  });
+  return [
+    `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+    ...inputBindings,
+    ...decisionBindings,
+    `    return [${items.join(', ')}];`,
     `  },`,
   ].join('\n');
 }
@@ -840,6 +897,9 @@ function emitDecisionFn(
   if (decision.invocation) {
     return emitInvocationFn(decision, decision.invocation, allNames, cctx);
   }
+  if (decision.relation) {
+    return emitRelationFn(decision, decision.relation, allNames, cctx);
+  }
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
     return `    const ${ident}: any = ctx[${JSON.stringify(n)}];`;
@@ -852,7 +912,7 @@ function emitDecisionFn(
     ? feelExpr(decision.literalExpressionText, allNames, cctx)
     : '/* TODO: non-literal expression not yet supported */ undefined';
   if (isScalarTypeRef(decision.typeRef)) {
-    expr = `feel.singleton(${expr})`;
+    expr = `feel.coerce(feel.singleton(${expr}), ${JSON.stringify(decision.typeRef)})`;
   }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
