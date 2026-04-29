@@ -124,6 +124,9 @@ export interface DmnItemDefinition {
 export interface DmnDecisionService {
   id?: string;
   name: string;
+  // Optional return-value type from `<variable typeRef="...">`. When set,
+  // the service result is validated against this type at the boundary.
+  typeRef?: string;
   outputDecisions: string[];
   inputDecisions: string[];
   inputData: string[];
@@ -378,6 +381,7 @@ export function parseDmn(xml: string): DmnModel {
   const decisionServices: DmnDecisionService[] = decisionServiceRaw.map((n) => ({
     id: n['@_id'],
     name: n['@_name'],
+    typeRef: n.variable?.['@_typeRef'],
     outputDecisions: arr<any>(n.outputDecision)
       .map((o) => resolveHref(o['@_href'] ?? ''))
       .filter((s) => s),
@@ -1259,8 +1263,12 @@ function emitDecisionService(ds: DmnDecisionService, model: DmnModel): string {
     ds.outputDecisions.length === 1 &&
     model.dmnVersion !== '1.1' &&
     model.dmnVersion !== '1.2';
+  // Validate the unwrapped result against the service's declared typeRef
+  // (only meaningful when the service unwraps to a single output).
+  const wrapValidate = (expr: string) =>
+    ds.typeRef && unwrapsSingle ? `feel.validate(${expr}, ${JSON.stringify(ds.typeRef)}, __itemDefs)` : expr;
   const ret = unwrapsSingle
-    ? `return decisions[${JSON.stringify(ds.outputDecisions[0])}](__svcCtx);`
+    ? `return ${wrapValidate(`decisions[${JSON.stringify(ds.outputDecisions[0])}](__svcCtx)`)};`
     : `return { ${calls} };`;
   const nullRet = `return null;`;
   // Reject when the call shape doesn't match the declared inputs — wrong
