@@ -362,7 +362,10 @@ export function parseDmn(xml: string): DmnModel {
   });
 
   const resolveHref = (href: string): string => {
-    const id = href.startsWith('#') ? href.slice(1) : href;
+    // Hrefs may be local (`#_id`) or namespace-qualified
+    // (`http://…#_id`); the part after the `#` is always the local ID.
+    const hashIdx = href.indexOf('#');
+    const id = hashIdx >= 0 ? href.slice(hashIdx + 1) : href;
     return idToName.get(id) ?? id;
   };
 
