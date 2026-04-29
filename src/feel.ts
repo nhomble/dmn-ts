@@ -35,7 +35,11 @@ export type FeelNode =
       kind: 'some' | 'every';
       bindings: { name: string; range: FeelNode }[];
       body: FeelNode;
-    };
+    }
+  | { type: 'between'; value: FeelNode; lo: FeelNode; hi: FeelNode }
+  | { type: 'in'; value: FeelNode; list: FeelNode }
+  | { type: 'instanceof'; value: FeelNode; typeName: string }
+  | { type: 'temporal'; value: string };
 
 type Token =
   | { kind: 'num'; value: number }
@@ -43,7 +47,8 @@ type Token =
   | { kind: 'ident'; name: string }
   | { kind: 'kw'; name: string }
   | { kind: 'op'; op: string }
-  | { kind: 'punct'; ch: string };
+  | { kind: 'punct'; ch: string }
+  | { kind: 'temporal'; value: string };
 
 const KEYWORDS = new Set([
   'and',
@@ -62,6 +67,8 @@ const KEYWORDS = new Set([
   'every',
   'satisfies',
   'between',
+  'instance',
+  'of',
 ]);
 const MULTI_OPS = ['<=', '>=', '!=', '**'];
 const SINGLE_OPS = ['<', '>', '=', '+', '-', '*', '/'];
@@ -212,6 +219,19 @@ function tokenize(input: string, knownNames: string[]): Token[] {
       i++;
       continue;
     }
+    // Line comment
+    if (c === '/' && input[i + 1] === '/') {
+      i += 2;
+      while (i < input.length && input[i] !== '\n') i++;
+      continue;
+    }
+    // Block comment
+    if (c === '/' && input[i + 1] === '*') {
+      i += 2;
+      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) i++;
+      if (i < input.length) i += 2;
+      continue;
+    }
 
     // Number
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(input[i + 1] ?? ''))) {
@@ -223,6 +243,24 @@ function tokenize(input: string, knownNames: string[]): Token[] {
       }
     }
 
+    // Temporal literal: @"..."
+    if (c === '@' && input[i + 1] === '"') {
+      let j = i + 2;
+      let raw = '';
+      while (j < input.length && input[j] !== '"') {
+        if (input[j] === '\\' && j + 1 < input.length) {
+          raw += input[j + 1];
+          j += 2;
+        } else {
+          raw += input[j];
+          j++;
+        }
+      }
+      if (j < input.length) j++;
+      tokens.push({ kind: 'temporal', value: raw });
+      i = j;
+      continue;
+    }
     // String
     if (c === '"') {
       let j = i + 1;
@@ -409,6 +447,36 @@ class Parser {
   }
   private parseComp(): FeelNode {
     const left = this.parseAdd();
+    if (this.isKw('between')) {
+      this.next();
+      const lo = this.parseAdd();
+      if (!this.isKw('and')) throw new Error('feel parse: expected and');
+      this.next();
+      const hi = this.parseAdd();
+      return { type: 'between', value: left, lo, hi };
+    }
+    if (this.isKw('in')) {
+      this.next();
+      // FEEL `in` may be followed by a positive unary test:
+      // `x in <= 10` ↔ `x <= 10`, similarly for <, >, >=, =. Otherwise it's
+      // list/range membership.
+      const t = this.peek();
+      if (t?.kind === 'op' && ['<=', '>=', '<', '>', '='].includes(t.op)) {
+        const op = (this.next() as { kind: 'op'; op: string }).op;
+        const right = this.parseAdd();
+        return { type: 'binop', op, left, right };
+      }
+      const list = this.parseAdd();
+      return { type: 'in', value: left, list };
+    }
+    if (this.isKw('instance')) {
+      this.next();
+      if (!this.isKw('of')) throw new Error('feel parse: expected of');
+      this.next();
+      const t = this.next();
+      const name = t.kind === 'ident' ? t.name : t.kind === 'kw' ? t.name : '';
+      return { type: 'instanceof', value: left, typeName: name };
+    }
     const compOps = ['<=', '>=', '!=', '<', '>', '='];
     const t = this.peek();
     if (t?.kind === 'op' && compOps.includes(t.op)) {
@@ -464,11 +532,20 @@ class Parser {
     while (this.isPunct('.') || this.isPunct('(') || this.isPunct('[')) {
       if (this.isPunct('.')) {
         this.next();
-        const t = this.next();
-        if (t.kind !== 'ident') {
+        // FEEL field names can be multi-word (e.g. `time offset`). Allow the
+        // first token to be a keyword (some types have `in` etc. as fields),
+        // then gather subsequent ident tokens only.
+        const first = this.peek();
+        if (first?.kind !== 'ident' && first?.kind !== 'kw') {
           throw new Error('feel parse: expected member name');
         }
-        expr = { type: 'member', obj: expr, name: t.name };
+        const parts: string[] = [
+          (this.next() as { kind: 'ident' | 'kw'; name: string }).name,
+        ];
+        while (this.peek()?.kind === 'ident') {
+          parts.push((this.next() as { kind: 'ident'; name: string }).name);
+        }
+        expr = { type: 'member', obj: expr, name: parts.join(' ') };
       } else if (this.isPunct('(')) {
         this.next();
         const positional: FeelNode[] = [];
@@ -525,6 +602,10 @@ class Parser {
     if (t.kind === 'str') {
       this.next();
       return { type: 'str', value: t.value };
+    }
+    if (t.kind === 'temporal') {
+      this.next();
+      return { type: 'temporal', value: t.value };
     }
     if (t.kind === 'kw') {
       if (t.name === 'true') {
@@ -710,6 +791,21 @@ export function emitFeelNode(
       const b = node.bindings[0];
       const method = node.kind === 'every' ? 'every' : 'some';
       return `((${emitFeelNode(b.range, ctx)}) as any[]).${method}((${toJsIdent(b.name)}: any) => ${emitFeelNode(node.body, ctx)} === true)`;
+    }
+    case 'between':
+      return `feel.and(feel.le(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.value, ctx)}), feel.le(${emitFeelNode(node.value, ctx)}, ${emitFeelNode(node.hi, ctx)}))`;
+    case 'in':
+      return `feel.list_contains(${emitFeelNode(node.list, ctx)}, ${emitFeelNode(node.value, ctx)})`;
+    case 'instanceof':
+      return `feel.instance_of(${emitFeelNode(node.value, ctx)}, ${JSON.stringify(node.typeName)})`;
+    case 'temporal': {
+      const v = node.value;
+      const lit = JSON.stringify(v);
+      if (/^-?P/.test(v)) return `feel.duration(${lit})`;
+      if (/^-?\d+-\d{2}-\d{2}T/.test(v)) return `feel.date_and_time(${lit})`;
+      if (/^-?\d+-\d{2}-\d{2}$/.test(v)) return `feel.date(${lit})`;
+      if (/^\d{2}:\d{2}/.test(v)) return `feel.time(${lit})`;
+      return 'null';
     }
   }
 }
@@ -1136,32 +1232,64 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   is_defined(v: any): any {
     return v !== undefined;
   },
+  instance_of(v: any, typeName: string): any {
+    if (v == null) return false;
+    const local = typeName.includes(':') ? typeName.split(':').pop() : typeName;
+    switch (local) {
+      case 'string':
+        return typeof v === 'string';
+      case 'number':
+        return typeof v === 'number' && Number.isFinite(v);
+      case 'boolean':
+        return typeof v === 'boolean';
+      case 'date':
+        return typeof v === 'string' && /^-?\\d{4,}-\\d{2}-\\d{2}$/.test(v);
+      case 'time':
+        return typeof v === 'string' && /^\\d{2}:\\d{2}:\\d{2}/.test(v) && !v.includes('T');
+      case 'dateTime':
+      case 'date and time':
+        return typeof v === 'string' && /T/.test(v);
+      case 'duration':
+      case 'years and months duration':
+      case 'days and time duration':
+        return typeof v === 'string' && /^-?P/.test(v);
+      case 'list':
+        return Array.isArray(v);
+      case 'context':
+        return typeof v === 'object' && !Array.isArray(v);
+      case 'Any':
+      case 'any':
+        return true;
+      default:
+        return null;
+    }
+  },
   date(...args: any[]): any {
     const fmt = (y: number, m: number, d: number): string | null => {
       if (![y, m, d].every(Number.isFinite)) return null;
-      // FEEL allows negative years (BCE); reject year 0 and invalid month/day.
+      // FEEL allows negative years (BCE) and extended (>4-digit) years; reject year 0 and out-of-range month/day.
       if (y === 0 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+      // Roundtrip via Date.UTC to catch Feb 30 etc. JS handles up to ~275000 reliably.
       const dt = new Date(Date.UTC(Math.abs(y), m - 1, d));
-      if (
-        Math.abs(y) > 0 && dt.getUTCFullYear() !== Math.abs(y)
-      ) return null;
+      if (Math.abs(y) <= 9999 && dt.getUTCFullYear() !== Math.abs(y)) return null;
       if (dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) return null;
       const sign = y < 0 ? '-' : '';
-      return \`\${sign}\${String(Math.abs(y)).padStart(4, '0')}-\${String(m).padStart(2, '0')}-\${String(d).padStart(2, '0')}\`;
+      const yStr = String(Math.abs(y));
+      return \`\${sign}\${yStr.length < 4 ? yStr.padStart(4, '0') : yStr}-\${String(m).padStart(2, '0')}-\${String(d).padStart(2, '0')}\`;
     };
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;
-      // Allow leading "-" for BCE.
-      const dtMatch = /^(-?\\d{4}-\\d{2}-\\d{2})/.exec(a);
+      const dtMatch = /^(-?\\d{4,}-\\d{2}-\\d{2})/.exec(a);
       const iso = dtMatch ? dtMatch[1] : a;
-      if (!/^-?\\d{4}-\\d{2}-\\d{2}$/.test(iso)) return null;
+      if (!/^-?\\d{4,}-\\d{2}-\\d{2}$/.test(iso)) return null;
       const neg = iso.startsWith('-');
       const body = neg ? iso.slice(1) : iso;
       const [y, m, d] = body.split('-').map(Number);
       return fmt(neg ? -y : y, m, d);
     }
     if (args.length === 3) {
+      if (args.some((a) => a == null)) return null;
       const [y, m, d] = args.map(Number);
       return fmt(y, m, d);
     }
@@ -1172,16 +1300,22 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
       if (![h, m, s].every(Number.isFinite)) return null;
       if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s >= 60) return null;
       const head = \`\${String(h).padStart(2, '0')}:\${String(m).padStart(2, '0')}:\${String(s).padStart(2, '0')}\`;
-      return head + (frac ?? '') + (tz ?? '');
+      // Canonicalize +00:00 / -00:00 to Z; preserve other offsets and IANA zones.
+      const tzNorm = tz === '+00:00' || tz === '-00:00' ? 'Z' : tz;
+      return head + (frac ?? '') + (tzNorm ?? '');
     };
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;
-      const m = /^(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})?$/.exec(a);
+      // Accept a date-and-time string and extract the time portion.
+      const dtTime = /T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}|@[A-Za-z_+\\-/]+)?)$/.exec(a);
+      const candidate = dtTime ? dtTime[1] : a;
+      const m = /^(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2}|@[A-Za-z_+\\-/]+)?$/.exec(candidate);
       if (!m) return null;
       return fmtTime(Number(m[1]), Number(m[2]), Number(m[3]), m[4], m[5]);
     }
     if (args.length >= 3) {
+      if (args.slice(0, 3).some((a) => a == null)) return null;
       const [h, m, s] = args.map(Number);
       return fmtTime(h, m, s);
     }
@@ -1191,13 +1325,19 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
     if (args.length === 1) {
       const a = args[0];
       if (typeof a !== 'string') return null;
-      const m = /^(-?\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})?)$/.exec(a);
+      // Accept a pure date string — append midnight.
+      if (/^-?\\d{4,}-\\d{2}-\\d{2}$/.test(a)) {
+        const d = feel.date(a);
+        return d ? \`\${d}T00:00:00\` : null;
+      }
+      const m = /^(-?\\d{4,}-\\d{2}-\\d{2})T(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}|@[A-Za-z_+\\-/]+)?)$/.exec(a);
       if (!m) return null;
       const d = feel.date(m[1]);
       const t = feel.time(m[2]);
       return d && t ? \`\${d}T\${t}\` : null;
     }
     if (args.length === 2) {
+      if (args.some((a) => a == null)) return null;
       const d = feel.date(args[0]);
       const t = feel.time(args[1]);
       return d && t ? \`\${d}T\${t}\` : null;
@@ -1206,16 +1346,77 @@ export const FEEL_RUNTIME_SOURCE = `const feel: any = {
   },
   duration(s: any): any {
     if (typeof s !== 'string') return null;
-    return /^-?P/.test(s) ? s : null;
+    const m = /^(-)?P(?:(\\d+)Y)?(?:(\\d+)M)?(?:(\\d+)D)?(?:T(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)(?:\\.(\\d*))?S)?)?$/.exec(s);
+    if (!m) return null;
+    // Reject empty body (\`P\` alone)
+    if (!m[2] && !m[3] && !m[4] && !m[5] && !m[6] && !m[7]) {
+      // Allow strings that explicitly pass through the T marker only if a 0-second is emitted
+      // Otherwise normalize to PT0S for inputs like "P0D".
+    }
+    const sign = m[1] || '';
+    let y = Number(m[2] || '0');
+    let mo = Number(m[3] || '0');
+    let d = Number(m[4] || '0');
+    let h = Number(m[5] || '0');
+    let mi = Number(m[6] || '0');
+    let sec = Number(m[7] || '0');
+    const fracDigits = m[8] ? m[8].replace(/0+$/, '') : '';
+    // Normalize: roll over seconds → minutes → hours → days. Don't roll
+    // months → years (months can exceed 12 when crossing year boundaries
+    // wasn't part of the input). Days don't roll into months (variable length).
+    if (sec >= 60) {
+      mi += Math.floor(sec / 60);
+      sec = sec % 60;
+    }
+    if (mi >= 60) {
+      h += Math.floor(mi / 60);
+      mi = mi % 60;
+    }
+    if (h >= 24) {
+      d += Math.floor(h / 24);
+      h = h % 24;
+    }
+    if (mo >= 12) {
+      y += Math.floor(mo / 12);
+      mo = mo % 12;
+    }
+    let date = '';
+    if (y) date += \`\${y}Y\`;
+    if (mo) date += \`\${mo}M\`;
+    if (d) date += \`\${d}D\`;
+    let time = '';
+    if (h) time += \`\${h}H\`;
+    if (mi) time += \`\${mi}M\`;
+    if (sec !== 0 || fracDigits) {
+      time += \`\${sec}\${fracDigits ? '.' + fracDigits : ''}S\`;
+    }
+    if (!date && !time) time = '0S';
+    return \`\${sign}P\${date}\${time ? 'T' + time : ''}\`;
   },
   years_and_months_duration(from: any, to: any): any {
     if (typeof from !== 'string' || typeof to !== 'string') return null;
-    const [y1, m1] = from.split('-').map(Number);
-    const [y2, m2] = to.split('-').map(Number);
-    let months = (y2 - y1) * 12 + (m2 - m1);
+    const parseFull = (s: string): { y: number; m: number; d: number } | null => {
+      const m = /^(-?)(\\d+)-(\\d{2})-(\\d{2})/.exec(s);
+      if (!m) return null;
+      const sgn = m[1] === '-' ? -1 : 1;
+      return { y: sgn * Number(m[2]), m: Number(m[3]), d: Number(m[4]) };
+    };
+    const a = parseFull(from);
+    const b = parseFull(to);
+    if (!a || !b) return null;
+    // Whole calendar months between the two dates.
+    let months = (b.y - a.y) * 12 + (b.m - a.m);
+    if (months > 0 && b.d < a.d) months -= 1;
+    if (months < 0 && b.d > a.d) months += 1;
     const sign = months < 0 ? '-' : '';
-    months = Math.abs(months);
-    return \`\${sign}P\${Math.floor(months / 12)}Y\${months % 12}M\`;
+    const abs = Math.abs(months);
+    const years = Math.floor(abs / 12);
+    const remM = abs % 12;
+    let body = '';
+    if (years) body += \`\${years}Y\`;
+    if (remM) body += \`\${remM}M\`;
+    if (!body) body = '0M';
+    return \`\${sign}P\${body}\`;
   },
 };
 `;

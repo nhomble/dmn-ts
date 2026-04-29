@@ -47,6 +47,7 @@ export interface DmnDecision {
   requiredDecisions: string[];
   literalExpressionText?: string;
   decisionTable?: DmnDecisionTable;
+  context?: DmnContext;
 }
 
 export interface DmnBkmParameter {
@@ -60,6 +61,16 @@ export interface DmnBkm {
   typeRef?: string;
   parameters: DmnBkmParameter[];
   bodyText?: string;
+}
+
+export interface DmnContextEntry {
+  name?: string;
+  typeRef?: string;
+  bodyText?: string;
+}
+
+export interface DmnContext {
+  entries: DmnContextEntry[];
 }
 
 export interface DmnModel {
@@ -83,6 +94,7 @@ const xmlParser = new XMLParser({
       'informationRequirement',
       'businessKnowledgeModel',
       'formalParameter',
+      'contextEntry',
     ].includes(name),
 });
 
@@ -181,6 +193,17 @@ export function parseDmn(xml: string): DmnModel {
         rules,
       };
     }
+    let context: DmnContext | undefined;
+    if (n.context) {
+      const entries: DmnContextEntry[] = arr<any>(n.context.contextEntry).map(
+        (e) => ({
+          name: e.variable?.['@_name'],
+          typeRef: e.variable?.['@_typeRef'],
+          bodyText: e.literalExpression?.text,
+        }),
+      );
+      context = { entries };
+    }
     return {
       id: n['@_id'],
       name: n['@_name'],
@@ -189,6 +212,7 @@ export function parseDmn(xml: string): DmnModel {
       requiredDecisions,
       literalExpressionText,
       decisionTable,
+      context,
     };
   });
 
@@ -461,6 +485,66 @@ function emitDecisionTableFn(
   return lines.join('\n');
 }
 
+function emitContextFn(
+  decision: DmnDecision,
+  context: DmnContext,
+  allNames: string[],
+  cctx: CompileContext,
+): string {
+  const declared = new Set<string>();
+  const lines: string[] = [];
+  for (const n of decision.requiredInputs) {
+    const ident = toJsIdent(n);
+    lines.push(`    let ${ident}: any = ctx[${JSON.stringify(n)}];`);
+    declared.add(ident);
+  }
+  for (const n of decision.requiredDecisions) {
+    const ident = toJsIdent(n);
+    lines.push(`    let ${ident}: any = decisions[${JSON.stringify(n)}](ctx);`);
+    declared.add(ident);
+  }
+
+  // Each entry's body may reference earlier entries by name. Extend the
+  // visible-name list as we go so the FEEL tokenizer recognizes them.
+  const localNames: string[] = [...allNames];
+  const namedKeys: { dmnName: string; ident: string }[] = [];
+  let finalReturn: string | null = null;
+  for (const e of context.entries) {
+    const body = e.bodyText
+      ? feelExpr(e.bodyText, localNames, cctx)
+      : 'undefined';
+    if (e.name) {
+      const ident = toJsIdent(e.name);
+      if (declared.has(ident)) {
+        lines.push(`    ${ident} = ${body};`);
+      } else {
+        lines.push(`    let ${ident}: any = ${body};`);
+        declared.add(ident);
+      }
+      namedKeys.push({ dmnName: e.name, ident });
+      if (!localNames.includes(e.name)) localNames.push(e.name);
+    } else {
+      finalReturn = body;
+    }
+  }
+  let ret: string;
+  if (finalReturn !== null) {
+    ret = `    return ${finalReturn};`;
+  } else {
+    const props = namedKeys
+      .map((k) => `${JSON.stringify(k.dmnName)}: ${k.ident}`)
+      .join(', ');
+    ret = `    return { ${props} };`;
+  }
+
+  return [
+    `  ${JSON.stringify(decision.name)}: (ctx) => {`,
+    ...lines,
+    ret,
+    `  },`,
+  ].join('\n');
+}
+
 function emitDecisionFn(
   decision: DmnDecision,
   allNames: string[],
@@ -468,6 +552,9 @@ function emitDecisionFn(
 ): string {
   if (decision.decisionTable) {
     return emitDecisionTableFn(decision, decision.decisionTable, allNames, cctx);
+  }
+  if (decision.context) {
+    return emitContextFn(decision, decision.context, allNames, cctx);
   }
   const inputBindings = decision.requiredInputs.map((n) => {
     const ident = toJsIdent(n);
