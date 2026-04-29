@@ -643,7 +643,20 @@ export const feel: any = {
         for (const c of def.components) {
           const fieldVal = (v as Record<string, unknown>)[c.name];
           if (fieldVal === undefined) return null;
-          if (c.typeRef && fieldVal !== null) {
+          if (fieldVal === null) continue;
+          // A component declared `isCollection` requires a list, with each
+          // element validated against the declared element typeRef.
+          if (c.isCollection) {
+            if (!Array.isArray(fieldVal)) return null;
+            if (c.typeRef) {
+              for (const elem of fieldVal as unknown[]) {
+                if (elem === null) continue;
+                if (feel.validate(elem, c.typeRef, itemDefs, { noSingleton: true }) === null) return null;
+              }
+            }
+            continue;
+          }
+          if (c.typeRef) {
             const validated = feel.validate(fieldVal, c.typeRef, itemDefs, { noSingleton: true });
             if (validated === null) return null;
           }

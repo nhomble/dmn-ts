@@ -121,7 +121,7 @@ export interface DmnItemDefinition {
   typeRef?: string;
   isCollection: boolean;
   allowedValues?: string[];
-  components?: { name: string; typeRef?: string }[];
+  components?: { name: string; typeRef?: string; isCollection?: boolean }[];
 }
 
 export interface DmnDecisionService {
@@ -411,6 +411,7 @@ export function parseDmn(xml: string): DmnModel {
       components: arr<any>(n.itemComponent).map((c) => ({
         name: c['@_name'] ?? '',
         typeRef: c.typeRef ?? c.typeRef?.['#text'],
+        isCollection: c['@_isCollection'] === 'true',
       })),
     };
   });
@@ -598,7 +599,7 @@ function emitItemDefsLiteral(model: DmnModel): string {
       const comps = it.components
         .map(
           (c) =>
-            `{ name: ${JSON.stringify(c.name)}${c.typeRef ? `, typeRef: ${JSON.stringify(c.typeRef)}` : ''} }`,
+            `{ name: ${JSON.stringify(c.name)}${c.typeRef ? `, typeRef: ${JSON.stringify(c.typeRef)}` : ''}${c.isCollection ? ', isCollection: true' : ''} }`,
         )
         .join(', ');
       fields.push(`components: [${comps}]`);
