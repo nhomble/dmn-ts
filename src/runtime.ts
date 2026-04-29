@@ -1622,6 +1622,23 @@ export const feel: any = {
   is_defined(v: any): any {
     return v !== undefined;
   },
+  // Safely invoke a value as a function. Used for bare-ident call sites
+  // where the resolved value may be undefined (unknown name), null, or a
+  // non-function — all of which FEEL spells as null.
+  try_call(getFn: () => any, args: any[]): any {
+    let fn: any;
+    try {
+      fn = getFn();
+    } catch {
+      return null;
+    }
+    if (typeof fn !== 'function') return null;
+    try {
+      return fn(...args);
+    } catch {
+      return null;
+    }
+  },
   // Invoke a FEEL function value with a named-arg context. Lambdas carry an
   // `__params` array (set by the emitter); we map names → positions and call
   // positionally. As a fallback, pass the named-args object through.

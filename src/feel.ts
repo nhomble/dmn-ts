@@ -1211,6 +1211,17 @@ export function emitFeelNode(
           return `feel.call_named(${emitFeelNode(node.fn, ctx)}, { ${props} })`;
         }
       }
+      // Calls to unknown / non-function values resolve to null, not a
+      // runtime error. Builtins are safe and not wrapped (the cost of a
+      // try/catch on every numeric op would be wasted). For idents, we
+      // use a `typeof`-probe so a missing name doesn't ReferenceError.
+      if (node.fn.type === 'ident' && !FEEL_BUILTINS[node.fn.name]) {
+        const ident = toJsIdent(node.fn.name);
+        return `feel.try_call(() => (typeof ${ident} !== 'undefined' ? ${ident} : null), [${positional.join(', ')}])`;
+      }
+      if (node.fn.type !== 'ident') {
+        return `feel.try_call(() => ${emitFeelNode(node.fn, ctx)}, [${positional.join(', ')}])`;
+      }
       return `${emitFeelNode(node.fn, ctx)}(${positional.join(', ')})`;
     }
     case 'member':
