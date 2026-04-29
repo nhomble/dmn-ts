@@ -260,7 +260,20 @@ function emitDecisionTableBody(
     (table.outputs.length === 1 && !!table.outputs[0].name);
   const lines: string[] = [];
   inputExprsJs.forEach((e, idx) => {
-    lines.push(`    const __in${idx}: any = ${e};`);
+    const inputValues = table.inputs[idx]?.inputValues;
+    if (inputValues && inputValues.length) {
+      // `<inputValues>` constrains the input — values that don't match
+      // any of the listed unary tests are coerced to null before rules
+      // are evaluated. Compile each constraint as a unary-test predicate.
+      const tests = inputValues
+        .map((iv) => translateUnaryTest(iv, '__raw', allNames))
+        .join(' || ');
+      lines.push(
+        `    const __in${idx}: any = (() => { const __raw: any = ${e}; return (${tests}) ? __raw : null; })();`,
+      );
+    } else {
+      lines.push(`    const __in${idx}: any = ${e};`);
+    }
   });
   lines.push(`    const __matches: any[] = [];`);
   // Wrap a compiled cell with `feel.validate(cell, typeRef)` when the

@@ -247,9 +247,15 @@ function parseContextEntryXml(e: any): DmnContextEntry {
 }
 
 function parseDecisionTableXml(dt: any): DmnDecisionTable {
-  const inputs: DmnDecisionTableInput[] = arr<any>(dt.input).map((i) => ({
-    text: i.inputExpression?.text ?? '',
-  }));
+  const inputs: DmnDecisionTableInput[] = arr<any>(dt.input).map((i) => {
+    const ivText: string | undefined = i.inputValues?.text;
+    return {
+      text: i.inputExpression?.text ?? '',
+      inputValues: ivText
+        ? splitTopLevelCommas(String(ivText)).map((s) => s.trim())
+        : undefined,
+    };
+  });
   const outputs: DmnDecisionTableOutput[] = arr<any>(dt.output).map((o) => {
     const ovText: string | undefined = o.outputValues?.text;
     const outputValues = ovText

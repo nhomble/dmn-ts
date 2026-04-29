@@ -11,6 +11,11 @@ export interface DmnInputData {
 
 export interface DmnDecisionTableInput {
   text: string;
+  // Optional `<inputValues>` constraint — same syntax as a unary-test list
+  // (`"foo", "bar"`, `[1..10]`, etc.). At evaluation time the input value
+  // is checked against the constraint; any non-conforming value is
+  // coerced to null before the rules see it.
+  inputValues?: string[];
 }
 
 export interface DmnDecisionTableOutput {
