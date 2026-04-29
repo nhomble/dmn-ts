@@ -971,20 +971,25 @@ function emitContextFn(
       finalReturn = body;
     }
   }
-  let ret: string;
+  let retExpr: string;
   if (finalReturn !== null) {
-    ret = `    return ${finalReturn};`;
+    retExpr = finalReturn;
   } else {
     const props = namedKeys
       .map((k) => `${JSON.stringify(k.dmnName)}: ${k.ident}`)
       .join(', ');
-    ret = `    return { ${props} };`;
+    retExpr = `{ ${props} }`;
+  }
+  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
+    const isCollection = cctx.collectionTypes?.has(typeRefLocal(decision.typeRef));
+    const inner = isCollection ? retExpr : `feel.singleton(${retExpr})`;
+    retExpr = `feel.validate(${inner}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
   }
 
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...lines,
-    ret,
+    `    return ${retExpr};`,
     `  },`,
   ].join('\n');
 }
@@ -1040,11 +1045,15 @@ function emitRelationFn(
     });
     return `{ ${props.join(', ')} }`;
   });
+  let retExpr = `[${items.join(', ')}]`;
+  if (decision.typeRef && (isScalarTypeRef(decision.typeRef) || cctx.validatableTypes?.has(typeRefLocal(decision.typeRef)))) {
+    retExpr = `feel.validate(${retExpr}, ${JSON.stringify(decision.typeRef)}, __itemDefs)`;
+  }
   return [
     `  ${JSON.stringify(decision.name)}: (ctx) => {`,
     ...inputBindings,
     ...decisionBindings,
-    `    return [${items.join(', ')}];`,
+    `    return ${retExpr};`,
     `  },`,
   ].join('\n');
 }

@@ -531,7 +531,7 @@ export const feel: any = {
   },
   // Validate a value against either a FEEL primitive type or a user-defined
   // item definition. Returns the value if it conforms, else null.
-  validate(v: any, typeRef: any, itemDefs: any): any {
+  validate(v: any, typeRef: any, itemDefs: any, opts?: { noSingleton?: boolean }): any {
     if (v === null || v === undefined) return null;
     if (typeof typeRef !== 'string') return v;
     const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
@@ -539,12 +539,17 @@ export const feel: any = {
     if (def) {
       if (def.isCollection) {
         // FEEL singleton-list rule: a single non-list value flows into a
-        // list-typed slot as a one-element list.
-        if (!Array.isArray(v)) v = [v];
+        // list-typed slot as a one-element list — but only at the top-level
+        // (a typed decision return). Inside a structure the rule doesn't
+        // apply, so a scalar where a list is expected is a type error.
+        if (!Array.isArray(v)) {
+          if (opts?.noSingleton) return null;
+          v = [v];
+        }
         if (def.base) {
           for (const item of v) {
             if (item === null) continue;
-            if (feel.validate(item, def.base, itemDefs) === null) return null;
+            if (feel.validate(item, def.base, itemDefs, { noSingleton: true }) === null) return null;
           }
         }
         return v;
@@ -581,7 +586,7 @@ export const feel: any = {
           const fieldVal = (v as Record<string, unknown>)[c.name];
           if (fieldVal === undefined) return null;
           if (c.typeRef && fieldVal !== null) {
-            const validated = feel.validate(fieldVal, c.typeRef, itemDefs);
+            const validated = feel.validate(fieldVal, c.typeRef, itemDefs, { noSingleton: true });
             if (validated === null) return null;
           }
         }
