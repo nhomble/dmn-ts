@@ -7,7 +7,9 @@ const xmlParser = new XMLParser({
   attributeNamePrefix: '@_',
   parseAttributeValue: false,
   parseTagValue: false,
-  trimValues: true,
+  // Test xml `<value>XYZ </value>` significantly preserves trailing/leading
+  // whitespace; trimming would mask real string semantics.
+  trimValues: false,
   isArray: (name) =>
     ['testCase', 'inputNode', 'resultNode', 'component', 'item'].includes(name),
 });
