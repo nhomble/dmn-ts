@@ -340,9 +340,17 @@ export const feel: any = {
   eq(a: any, b: any): any {
     if (a === null && b === null) return true;
     if (a == null || b == null) return false;
-    // Cross-type comparison → null (FEEL spec). Note: arrays and ranges are
-    // both `typeof 'object'`; the branches below disambiguate.
     if (typeof a !== typeof b) return null;
+    // Time and date-and-time equality is to second resolution (TCK 1.3+):
+    // strip fractional seconds before comparing.
+    if (typeof a === 'string' && typeof b === 'string') {
+      const isTime = feel.is_time(a) && feel.is_time(b);
+      const isDt =
+        /^-?\d{4,9}-\d{2}-\d{2}T/.test(a) && /^-?\d{4,9}-\d{2}-\d{2}T/.test(b);
+      if (isTime || isDt) {
+        return a.replace(/\.\d+/, '') === b.replace(/\.\d+/, '');
+      }
+    }
     if (typeof a === 'number' && typeof b === 'number') {
       if (a === b) return true;
       const diff = Math.abs(a - b);

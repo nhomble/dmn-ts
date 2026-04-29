@@ -113,9 +113,11 @@ export interface CaseRunSummary {
 }
 
 type Decisions = Record<string, (ctx: Record<string, unknown>) => unknown>;
+type DecisionServices = Record<string, (...args: unknown[]) => unknown>;
 
 export interface CaseModule {
   decisions?: Decisions;
+  decisionServices?: DecisionServices;
 }
 
 export function listTestFiles(caseDir: string): string[] {
@@ -139,9 +141,15 @@ export function runTestCases(
     for (const tc of cases) {
       const id = tc['@_id'] ?? '?';
       const ctx: Record<string, unknown> = {};
+      const inputs: unknown[] = [];
       for (const inNode of arr<any>(tc.inputNode)) {
-        ctx[inNode['@_name']] = parseTestNodeBody(inNode);
+        const v = parseTestNodeBody(inNode);
+        ctx[inNode['@_name']] = v;
+        inputs.push(v);
       }
+      const isService =
+        tc['@_type'] === 'decisionService' && tc['@_invocableName'];
+      const serviceName = isService ? (tc['@_invocableName'] as string) : null;
       for (const rn of arr<any>(tc.resultNode)) {
         const name = rn['@_name'];
         const expected = parseTestNodeBody(rn.expected);
@@ -165,13 +173,24 @@ export function runTestCases(
           record('fail', 'module exports no decisions');
           continue;
         }
-        const fn = decisions[name];
-        if (!fn) {
-          record('fail', `no decision named ${JSON.stringify(name)}`);
-          continue;
-        }
         try {
-          const actual = fn(ctx);
+          let actual: unknown;
+          if (serviceName) {
+            const services = mod?.decisionServices;
+            const svc = services?.[serviceName];
+            if (!svc) {
+              record('fail', `no decision service named ${JSON.stringify(serviceName)}`);
+              continue;
+            }
+            actual = svc(...inputs);
+          } else {
+            const fn = decisions[name];
+            if (!fn) {
+              record('fail', `no decision named ${JSON.stringify(name)}`);
+              continue;
+            }
+            actual = fn(ctx);
+          }
           if (deepEqual(actual, expected)) record('pass');
           else
             record(

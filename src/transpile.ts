@@ -1052,6 +1052,10 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     ...model.decisions.map((d) => emitDecisionFn(d, allNames, cctx)),
     `};`,
     ``,
+    model.decisionServices.length
+      ? `export const decisionServices: Record<string, (...args: any[]) => any> = { ${model.decisionServices.map((s) => `${JSON.stringify(s.name)}: ${toJsIdent(s.name)}`).join(', ')} };`
+      : null,
+    model.decisionServices.length ? '' : null,
   ]
     .filter((l): l is string => l !== null)
     .join('\n');
