@@ -50,7 +50,7 @@ export const feel: any = {
     let body = '';
     if (y) body += `${y}Y`;
     if (mo) body += `${mo}M`;
-    if (!body) body = '0Y';
+    if (!body) body = '0M';
     return `${n === 0 ? '' : sign}P${body}`;
   },
   // Days-and-time duration → total seconds (may be fractional); null otherwise.
@@ -744,8 +744,7 @@ export const feel: any = {
       args.length === 1 && (Array.isArray(args[0]) || feel.asList(args[0])) !== null
         ? (feel.asList(args[0]) as any[])
         : args;
-    if (!Array.isArray(items)) return null;
-    if (items.length === 0) return [];
+    if (!Array.isArray(items) || items.length === 0) return null;
     const counts = new Map<any, number>();
     for (const x of items) counts.set(x, (counts.get(x) ?? 0) + 1);
     let max = 0;
@@ -760,7 +759,9 @@ export const feel: any = {
     if (typeof precedes !== 'function') return [...list].sort();
     return [...list].sort((a: any, b: any) => (precedes(a, b) === true ? -1 : 1));
   },
-  get_value(m: any, key: any): any {
+  get_value(...args: any[]): any {
+    if (args.length !== 2) return null;
+    const [m, key] = args;
     if (m == null || typeof m !== 'object' || Array.isArray(m)) return null;
     if (typeof key !== 'string') return null;
     return key in m ? (m as Record<string, unknown>)[key] : null;
@@ -1393,6 +1394,14 @@ export const feel: any = {
     let mi = Number(m[6] || '0');
     let sec = Number(m[7] || '0');
     const fracDigits = m[8] ? m[8].replace(/0+$/, '') : '';
+    // If the input only carries years/months (no day/time), emit the
+    // years-and-months canonical form via ym_format.
+    // If the input only carries years/months (no day/time), emit the
+    // years-and-months canonical form via ym_format.
+    if ((y || mo) && !d && !h && !mi && !sec && !fracDigits) {
+      const totalMonths = (sign === '-' ? -1 : 1) * (y * 12 + mo);
+      return feel.ym_format(totalMonths);
+    }
     // Normalize: roll over seconds → minutes → hours → days. Don't roll
     // months → years (months can exceed 12 when crossing year boundaries
     // wasn't part of the input). Days don't roll into months (variable length).
