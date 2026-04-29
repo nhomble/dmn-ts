@@ -270,3 +270,114 @@ test('is: strict same-type same-value', () => {
   assert.equal(feel.is_fn('foo', 'foo'), true);
   assert.equal(feel.is_fn(null, null), true);
 });
+
+// ---- XPath regex flag/pattern translation --------------------------------
+
+test('_xpath_flags: maps i / m / s and rejects unknown flags', () => {
+  // Unicode-aware case folding requires JS's `u` flag; we add it on `i`.
+  assert.equal(feel._xpath_flags('i'), 'iu');
+  assert.equal(feel._xpath_flags('m'), 'm');
+  assert.equal(feel._xpath_flags('s'), 's');
+  // `x` (ignore-whitespace) and `q` (literal) are handled at the pattern
+  // level, so they don't appear in the JS flags string.
+  assert.equal(feel._xpath_flags('x'), '');
+  assert.equal(feel._xpath_flags('q'), '');
+  assert.equal(feel._xpath_flags(''), '');
+  // An unrecognised flag is an error — the whole flags string fails.
+  assert.equal(feel._xpath_flags('p'), null);
+});
+
+test('_xpath_pattern: q-flag escapes regex metachars', () => {
+  // With `q`, the pattern matches the literal string.
+  assert.equal(feel._xpath_pattern('a.b', 'q'), 'a\\.b');
+  assert.equal(feel._xpath_pattern('$5.00', 'q'), '\\$5\\.00');
+});
+
+test('_xpath_pattern: x-flag strips comments and whitespace', () => {
+  assert.equal(feel._xpath_pattern('a # comment\nb', 'x'), 'ab');
+  // ...but preserves whitespace inside character classes.
+  assert.equal(feel._xpath_pattern('a [ ]b', 'x'), 'a[ ]b');
+});
+
+test('_xpath_pattern: rewrites `[X-[Y]]` character-class subtraction', () => {
+  // XPath supports `[A-Z-[OI]]` as "A-Z minus O,I". JS regex doesn't, so
+  // we translate to a negative-lookahead form.
+  assert.equal(feel._xpath_pattern('[A-Z-[OI]]', ''), '(?![OI])[A-Z]');
+});
+
+// ---- Time / datetime parsing helpers -------------------------------------
+
+test('_time_to_seconds: HH:MM:SS with optional fractional', () => {
+  assert.equal(feel._time_to_seconds('10:30:45'), 10 * 3600 + 30 * 60 + 45);
+  assert.equal(feel._time_to_seconds('00:00:00'), 0);
+  // Fractional seconds preserved.
+  assert.equal(feel._time_to_seconds('00:00:01.5'), 1.5);
+  // Trailing zone suffix is ignored — wall-clock seconds only.
+  assert.equal(feel._time_to_seconds('10:30:00@Europe/Paris'), 37800);
+});
+
+test('_time_to_seconds: rejects non-time inputs', () => {
+  assert.equal(feel._time_to_seconds('not-a-time'), null);
+  assert.equal(feel._time_to_seconds(null), null);
+  assert.equal(feel._time_to_seconds(42), null);
+});
+
+test('_iana_offset_min: resolves IANA zone offset for a given instant', () => {
+  // Australia/Melbourne is +11:00 in January (DST) — 660 minutes.
+  const summer = new Date(Date.UTC(2021, 0, 15));
+  assert.equal(feel._iana_offset_min(summer, 'Australia/Melbourne'), 660);
+  // Etc/UTC is always 0.
+  assert.equal(feel._iana_offset_min(summer, 'Etc/UTC'), 0);
+});
+
+test('_iana_offset_min: returns null for invalid inputs', () => {
+  assert.equal(feel._iana_offset_min(null, 'Europe/Paris'), null);
+  assert.equal(feel._iana_offset_min(new Date(), 'Not/A/Zone'), null);
+});
+
+test('_dt_to_utc_ms: builds a UTC instant from date + time + tz', () => {
+  // Without a zone, the parts are interpreted as already in UTC.
+  assert.equal(
+    feel._dt_to_utc_ms('2021-01-15', '10:00:00', ''),
+    Date.UTC(2021, 0, 15, 10),
+  );
+  // `Z` is also UTC.
+  assert.equal(
+    feel._dt_to_utc_ms('2021-01-15', '10:00:00', 'Z'),
+    Date.UTC(2021, 0, 15, 10),
+  );
+  // `+02:00` shifts back two hours to land on the same instant in UTC.
+  assert.equal(
+    feel._dt_to_utc_ms('2021-01-15', '10:00:00', '+02:00'),
+    Date.UTC(2021, 0, 15, 8),
+  );
+});
+
+test('_dt_to_utc_ms: handles negative / extended years', () => {
+  // Date.UTC mishandles years < 100 (it adds 1900); our helper uses
+  // setUTCFullYear so `-0001` and `12345` come through unchanged.
+  const negative = feel._dt_to_utc_ms('-0001-06-15', '00:00:00', 'Z');
+  const expected = (() => {
+    const d = new Date(0);
+    d.setUTCFullYear(-1, 5, 15);
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+  assert.equal(negative, expected);
+});
+
+// ---- Duration comparison -------------------------------------------------
+
+test('_dur_cmp: compares same-family durations numerically', () => {
+  // Year-month family: P1Y > P11M.
+  assert.ok((feel._dur_cmp('P1Y', 'P11M') as number) > 0);
+  assert.ok((feel._dur_cmp('P11M', 'P1Y') as number) < 0);
+  assert.equal(feel._dur_cmp('P12M', 'P1Y'), 0);
+  // Days-time family: PT2H > PT60M.
+  assert.ok((feel._dur_cmp('PT2H', 'PT60M') as number) > 0);
+});
+
+test('_dur_cmp: cross-family compare is undefined (null)', () => {
+  // Years-months can't be ordered against days-time without a calendar.
+  assert.equal(feel._dur_cmp('P1Y', 'P30D'), null);
+});

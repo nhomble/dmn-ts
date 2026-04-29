@@ -1,6 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { castByXsi, normalizeIsoDuration, smartCoerce } from './tck-values.js';
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -17,32 +18,6 @@ const xmlParser = new XMLParser({
 function arr<T>(v: T | T[] | undefined): T[] {
   if (v === undefined || v === null) return [];
   return Array.isArray(v) ? v : [v];
-}
-
-function smartCoerce(raw: string): unknown {
-  // No xsi:type — guess a sensible primitive. TCK XMLs often omit xsi.
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (raw === '' || raw === 'null') return raw === '' ? '' : null;
-  // A signed decimal (also accept leading-dot like `.041`) that round-trips
-  // through Number is treated as number.
-  if (/^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(raw)) {
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n;
-  }
-  return raw;
-}
-
-function castByXsi(raw: string, xsi: string | undefined): unknown {
-  if (xsi === undefined) return smartCoerce(raw);
-  // The XML Schema namespace can be bound to either `xsd:` or `xs:` (or another
-  // prefix). Strip whatever prefix is in use and match on the local name.
-  const local = xsi.includes(':') ? (xsi.split(':').pop() as string) : xsi;
-  if (local === 'decimal' || local === 'integer' || local === 'double' || local === 'long' || local === 'float') {
-    return Number(raw);
-  }
-  if (local === 'boolean') return raw === 'true';
-  return raw;
 }
 
 function parseValueNode(node: unknown): unknown {
@@ -76,26 +51,6 @@ function parseTestNodeBody(node: any): unknown {
     return parseValueNode(node.value);
   }
   return parseValueNode(node);
-}
-
-function normalizeIsoDuration(s: string): string | null {
-  // Parses `[-]P[nY][nM][nDT[nH][nM][nS]]` and returns a canonical form
-  // where missing parts are zeroed for stable comparison. Returns null
-  // for inputs that don't look like an ISO 8601 duration.
-  const m = /^(-?)P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(s);
-  if (!m) return null;
-  const [, sign, y, mo, d, h, mi, sec] = m;
-  // Reject empty `P` (no parts at all).
-  if (!y && !mo && !d && !h && !mi && !sec) return null;
-  const yn = Number(y ?? 0);
-  const mn = Number(mo ?? 0);
-  const dn = Number(d ?? 0);
-  const hn = Number(h ?? 0);
-  const min = Number(mi ?? 0);
-  const sn = Number(sec ?? 0);
-  // Both `P1Y` and `P1Y0M` denote the same year-month value; canonicalize
-  // by always including both year and month components when either is set.
-  return `${sign}|${yn}|${mn}|${dn}|${hn}|${min}|${sn}`;
 }
 
 export function deepEqual(a: unknown, b: unknown): boolean {

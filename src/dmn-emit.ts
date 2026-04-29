@@ -24,6 +24,7 @@ import type {
   DmnRelation,
 } from './dmn-model.js';
 import { splitTopLevelCommas } from './dmn-parse.js';
+import { isScalarTypeRef, typeRefLocal } from './type-utils.js';
 
 function feelExpr(
   text: string,
@@ -86,35 +87,11 @@ function emitItemDefsLiteral(model: DmnModel): string {
   return `{ ${props.join(', ')} }`;
 }
 
-const SCALAR_FEEL_TYPES = new Set([
-  'string',
-  'number',
-  'boolean',
-  'date',
-  'time',
-  'dateTime',
-  'date and time',
-  'duration',
-  'years and months duration',
-  'days and time duration',
-  'any',
-]);
-
-function typeRefLocal(typeRef: string): string {
-  return typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
-}
-
-function isScalarTypeRef(typeRef?: string): boolean {
-  if (!typeRef) return false;
-  const local = typeRef.includes(':') ? typeRef.split(':').pop()! : typeRef;
-  return SCALAR_FEEL_TYPES.has(local);
-}
-
 // Translates a FEEL unary test (the `inputEntry` body of a decision-table rule)
 // into a JS boolean expression evaluating against `inputExprJs`. Comparisons
 // route through the FEEL runtime so null inputs and string compares behave as
 // FEEL expects.
-function translateUnaryTest(
+export function translateUnaryTest(
   testText: string,
   inputExprJs: string,
   allNames: string[],

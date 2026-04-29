@@ -55,6 +55,19 @@ function arr<T>(v: T | T[] | undefined): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
+// Map a DMN root `xmlns` URL to a version label. Each spec release uses a
+// different dated namespace URL — match against the YYYYMMDD fragment.
+export function detectDmnVersion(xml: string): DmnModel['dmnVersion'] {
+  const xmlnsMatch = /xmlns(?::[^=]+)?="([^"]*DMN[^"]*)"/.exec(xml);
+  const ns = xmlnsMatch?.[1] ?? '';
+  if (/20151101/.test(ns)) return '1.1';
+  if (/20180521/.test(ns)) return '1.2';
+  if (/20191111/.test(ns)) return '1.3';
+  if (/20211108/.test(ns)) return '1.4';
+  if (/20240513|20230324|20240324/.test(ns)) return '1.5';
+  return 'unknown';
+}
+
 // Splits a string on top-level commas (skipping commas inside strings,
 // parens, brackets). Used by both the DMN parser (to split allowed-values
 // lists, output-values lists) and the emitter (to translate decision-table
@@ -267,16 +280,7 @@ export function parseDmn(xml: string): DmnModel {
   const defs = parsed.definitions;
   if (!defs) throw new Error('No <definitions> root element');
 
-  // Detect DMN version from the root xmlns. Each release uses a different
-  // dated URL; map the date to a version label.
-  let dmnVersion: DmnModel['dmnVersion'] = 'unknown';
-  const xmlnsMatch = /xmlns(?::[^=]+)?="([^"]*DMN[^"]*)"/.exec(xml);
-  const ns = xmlnsMatch?.[1] ?? '';
-  if (/20151101/.test(ns)) dmnVersion = '1.1';
-  else if (/20180521/.test(ns)) dmnVersion = '1.2';
-  else if (/20191111/.test(ns)) dmnVersion = '1.3';
-  else if (/20211108/.test(ns)) dmnVersion = '1.4';
-  else if (/20240513|20230324|20240324/.test(ns)) dmnVersion = '1.5';
+  const dmnVersion = detectDmnVersion(xml);
 
   const idToName = new Map<string, string>();
 
