@@ -12,6 +12,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { emitTs, parseDmn } from './transpile.js';
+import { getRuntimeSource } from './feel.js';
 import {
   type CaseModule,
   type TestResult,
@@ -103,6 +104,8 @@ async function main(): Promise<void> {
 
   if (existsSync(outDir)) rmSync(outDir, { recursive: true });
   mkdirSync(join(outDir, 'cases'), { recursive: true });
+  // One shared FEEL runtime for all cases.
+  writeFileSync(join(outDir, 'cases', 'runtime.ts'), getRuntimeSource());
 
   const records: CaseRecord[] = [];
   const slugFor = (caseDir: string): string => {
@@ -128,7 +131,7 @@ async function main(): Promise<void> {
     try {
       const xml = readFileSync(dmnPath, 'utf8');
       const model = parseDmn(xml);
-      const ts = emitTs(model);
+      const ts = emitTs(model, { runtimeImport: '../runtime.js' });
       const dest = join(outDir, 'cases', slug);
       mkdirSync(dest, { recursive: true });
       writeFileSync(join(dest, 'index.ts'), ts);
