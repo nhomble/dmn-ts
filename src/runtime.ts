@@ -1052,20 +1052,29 @@ export const feel: any = {
     return [...list.slice(0, i - 1), ...list.slice(i)];
   },
   list_replace(list: any, position: any, newItem: any): any {
-    if (!Array.isArray(list) || position == null) return null;
+    if (position == null) return null;
+    // Singleton-list rule: a scalar non-list `list` is coerced to `[list]`.
+    if (!Array.isArray(list)) {
+      if (list == null) return null;
+      list = [list];
+    }
     // Accept either a numeric position (1-based, decimals truncate) or a
     // predicate `(item, newItem) -> boolean` that selects which entries
     // to replace.
     if (typeof position === 'function') {
-      // Match function must accept exactly two args (item, newItem).
       if (position.length !== 2) return null;
-      try {
-        return list.map((it: any) =>
-          position(it, newItem) === true ? newItem : it,
-        );
-      } catch {
-        return null;
+      const out: any[] = [];
+      for (const it of list) {
+        let r: any;
+        try {
+          r = position(it, newItem);
+        } catch {
+          return null;
+        }
+        if (typeof r !== 'boolean') return null;
+        out.push(r ? newItem : it);
       }
+      return out;
     }
     if (typeof position !== 'number' || !Number.isFinite(position)) return null;
     let i = Math.trunc(position);
@@ -1098,6 +1107,8 @@ export const feel: any = {
     return Math.sqrt(v);
   },
   mode(...args: any[]): any {
+    // Zero-arity call is undefined.
+    if (args.length === 0) return null;
     // Single null arg → null (per FEEL: null is not a list).
     if (args.length === 1 && args[0] === null) return null;
     const items =
@@ -1106,7 +1117,6 @@ export const feel: any = {
         : args;
     if (!Array.isArray(items)) return null;
     if (items.length === 0) return [];
-    // Numbers only — non-numeric items disqualify the call.
     for (const x of items) {
       if (typeof x !== 'number' || !Number.isFinite(x)) return null;
     }
