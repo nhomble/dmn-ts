@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { emitTs, parseDmn } from './transpile.js';
@@ -105,8 +105,12 @@ async function main(): Promise<void> {
   mkdirSync(join(outDir, 'cases'), { recursive: true });
 
   const records: CaseRecord[] = [];
+  const slugFor = (caseDir: string): string => {
+    const rel = relative(tckRoot, caseDir) || basename(caseDir);
+    return rel.split(sep).join('__').replace(/[^A-Za-z0-9_-]/g, '_');
+  };
   for (const caseDir of caseDirs) {
-    const slug = basename(caseDir);
+    const slug = slugFor(caseDir);
     const dmnPath = findDmnFile(caseDir);
     const rec: CaseRecord = {
       name: slug,
