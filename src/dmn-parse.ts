@@ -1,0 +1,447 @@
+// DMN XML → `DmnModel`. Pure transformation: no FEEL compilation, no TS
+// emission. The output of `parseDmn` is a fully-resolved data structure
+// (hrefs resolved to names, boxed-expression sub-trees translated to FEEL
+// text) that the emitter consumes without further XML knowledge.
+
+import { XMLParser } from 'fast-xml-parser';
+import type {
+  DmnBkm,
+  DmnBkmParameter,
+  DmnContext,
+  DmnContextEntry,
+  DmnDecision,
+  DmnDecisionService,
+  DmnDecisionTable,
+  DmnDecisionTableInput,
+  DmnDecisionTableOutput,
+  DmnDecisionTableRule,
+  DmnInputData,
+  DmnInvocation,
+  DmnInvocationBinding,
+  DmnItemDefinition,
+  DmnModel,
+  DmnRelation,
+  DmnRelationRow,
+} from './dmn-model.js';
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  parseAttributeValue: false,
+  parseTagValue: false,
+  trimValues: true,
+  removeNSPrefix: true,
+  isArray: (name) =>
+    [
+      'decision',
+      'inputData',
+      'informationRequirement',
+      'businessKnowledgeModel',
+      'formalParameter',
+      'contextEntry',
+      'binding',
+      'column',
+      'row',
+      'decisionService',
+      'outputDecision',
+      'inputDecision',
+      'itemDefinition',
+      'itemComponent',
+    ].includes(name),
+});
+
+function arr<T>(v: T | T[] | undefined): T[] {
+  if (v === undefined || v === null) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
+// Splits a string on top-level commas (skipping commas inside strings,
+// parens, brackets). Used by both the DMN parser (to split allowed-values
+// lists, output-values lists) and the emitter (to translate decision-table
+// input entries with comma-separated alternatives).
+export function splitTopLevelCommas(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let inStr = false;
+  let cur = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      cur += c;
+      if (c === '\\' && i + 1 < s.length) {
+        cur += s[++i];
+      } else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      cur += c;
+      continue;
+    }
+    if (c === '(' || c === '[') {
+      depth++;
+      cur += c;
+      continue;
+    }
+    if (c === ')' || c === ']') {
+      depth--;
+      cur += c;
+      continue;
+    }
+    if (c === ',' && depth === 0) {
+      const t = cur.trim();
+      if (t !== '') out.push(t);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  const t = cur.trim();
+  if (t !== '') out.push(t);
+  return out;
+}
+
+// Translate a boxed `<functionDefinition>` (which may itself nest more
+// `<functionDefinition>`s for currying) into FEEL `function(...)` text.
+function functionDefToFeelText(fd: any): string {
+  const fdParams = arr<any>(fd.formalParameter)
+    .map((p) => p['@_name'])
+    .filter((n) => typeof n === 'string');
+  let body: string;
+  if (fd.functionDefinition) {
+    body = functionDefToFeelText(fd.functionDefinition);
+  } else {
+    body = fd.literalExpression?.text ?? 'null';
+  }
+  return `function(${fdParams.join(', ')}) ${body}`;
+}
+
+// Extract the FEEL-text body of a boxed sub-expression element. The DMN
+// schema uses literalExpression most often, but the same slot can carry
+// any expression form — we recurse into those by re-using the relevant
+// translators.
+function boxedExprText(node: any): string {
+  if (!node) return 'null';
+  if (node.literalExpression?.text != null) return String(node.literalExpression.text);
+  if (node.functionDefinition) return functionDefToFeelText(node.functionDefinition);
+  if (node.some) return quantifiedToFeelText(node.some, 'some');
+  if (node.every) return quantifiedToFeelText(node.every, 'every');
+  if (node.for) return forBoxedToFeelText(node.for);
+  if (node.filter) return filterBoxedToFeelText(node.filter);
+  if (node.conditional) return conditionalBoxedToFeelText(node.conditional);
+  if (node.list) {
+    const items = arr<any>(node.list.literalExpression).map((le) =>
+      String(le?.text ?? 'null'),
+    );
+    return `[${items.join(', ')}]`;
+  }
+  return 'null';
+}
+
+function quantifiedToFeelText(node: any, kw: 'some' | 'every'): string {
+  const v = node['@_iteratorVariable'] ?? 'item';
+  const inExpr = boxedExprText(node.in);
+  const sat = boxedExprText(node.satisfies);
+  return `${kw} ${v} in (${inExpr}) satisfies (${sat})`;
+}
+
+function forBoxedToFeelText(node: any): string {
+  const v = node['@_iteratorVariable'] ?? 'item';
+  const inExpr = boxedExprText(node.in);
+  const ret = boxedExprText(node.return);
+  return `for ${v} in (${inExpr}) return (${ret})`;
+}
+
+function filterBoxedToFeelText(node: any): string {
+  const inExpr = boxedExprText(node.in);
+  const match = boxedExprText(node.match);
+  return `(${inExpr})[${match}]`;
+}
+
+function conditionalBoxedToFeelText(node: any): string {
+  const cond = boxedExprText(node.if);
+  const thenE = boxedExprText(node.then);
+  const elseE = boxedExprText(node.else);
+  return `if (${cond}) then (${thenE}) else (${elseE})`;
+}
+
+function parseRelationXml(rel: any): DmnRelation {
+  const columns = arr<any>(rel.column).map((c) => c['@_name'] ?? '');
+  const rows: DmnRelationRow[] = arr<any>(rel.row).map((r) => ({
+    cells: arr<any>(r.literalExpression).map((le) => String(le?.text ?? '')),
+  }));
+  return { columns, rows };
+}
+
+function parseInvocationXml(inv: any): DmnInvocation {
+  const bindings: DmnInvocationBinding[] = arr<any>(inv.binding).map((b) => ({
+    name: b.parameter?.['@_name'] ?? '',
+    typeRef: b.parameter?.['@_typeRef'],
+    bodyText: b.literalExpression?.text,
+  }));
+  return {
+    fnText: inv.literalExpression?.text,
+    bindings,
+  };
+}
+
+function parseContextXml(ctx: any): DmnContext {
+  const entries: DmnContextEntry[] = arr<any>(ctx.contextEntry).map(parseContextEntryXml);
+  return { entries };
+}
+
+function parseContextEntryXml(e: any): DmnContextEntry {
+  const out: DmnContextEntry = {
+    name: e.variable?.['@_name'],
+    typeRef: e.variable?.['@_typeRef'],
+  };
+  if (e.functionDefinition) {
+    const fd = e.functionDefinition;
+    out.bodyText = fd.literalExpression?.text;
+    out.functionParameters = arr<any>(fd.formalParameter).map((p) => ({
+      name: p['@_name'],
+      typeRef: p['@_typeRef'],
+    }));
+    return out;
+  }
+  if (e.decisionTable) {
+    out.decisionTable = parseDecisionTableXml(e.decisionTable);
+    return out;
+  }
+  if (e.invocation) {
+    out.invocation = parseInvocationXml(e.invocation);
+    return out;
+  }
+  if (e.context) {
+    out.context = parseContextXml(e.context);
+    return out;
+  }
+  out.bodyText = e.literalExpression?.text;
+  return out;
+}
+
+function parseDecisionTableXml(dt: any): DmnDecisionTable {
+  const inputs: DmnDecisionTableInput[] = arr<any>(dt.input).map((i) => ({
+    text: i.inputExpression?.text ?? '',
+  }));
+  const outputs: DmnDecisionTableOutput[] = arr<any>(dt.output).map((o) => {
+    const ovText: string | undefined = o.outputValues?.text;
+    const outputValues = ovText
+      ? parseOutputValuesList(String(ovText))
+      : undefined;
+    return {
+      name: o['@_name'],
+      typeRef: o['@_typeRef'],
+      outputValues,
+      defaultText: o.defaultOutputEntry?.text,
+    };
+  });
+  const rules: DmnDecisionTableRule[] = arr<any>(dt.rule).map((r) => ({
+    inputEntries: arr<any>(r.inputEntry).map((e) => String(e?.text ?? '')),
+    outputEntries: arr<any>(r.outputEntry).map((e) => String(e?.text ?? '')),
+  }));
+  return {
+    hitPolicy: dt['@_hitPolicy'] ?? 'UNIQUE',
+    aggregation: dt['@_aggregation'],
+    inputs,
+    outputs,
+    rules,
+  };
+}
+
+// Parses an outputValues text body like `"Approved","Declined"` into the
+// priority-ordered list of output values.
+function parseOutputValuesList(text: string): string[] {
+  const parts = splitTopLevelCommas(text);
+  return parts.map((p) => {
+    const t = p.trim();
+    if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+      return t.slice(1, -1);
+    }
+    return t;
+  });
+}
+
+export function parseDmn(xml: string): DmnModel {
+  const parsed = xmlParser.parse(xml);
+  const defs = parsed.definitions;
+  if (!defs) throw new Error('No <definitions> root element');
+
+  // Detect DMN version from the root xmlns. Each release uses a different
+  // dated URL; map the date to a version label.
+  let dmnVersion: DmnModel['dmnVersion'] = 'unknown';
+  const xmlnsMatch = /xmlns(?::[^=]+)?="([^"]*DMN[^"]*)"/.exec(xml);
+  const ns = xmlnsMatch?.[1] ?? '';
+  if (/20151101/.test(ns)) dmnVersion = '1.1';
+  else if (/20180521/.test(ns)) dmnVersion = '1.2';
+  else if (/20191111/.test(ns)) dmnVersion = '1.3';
+  else if (/20211108/.test(ns)) dmnVersion = '1.4';
+  else if (/20240513|20230324|20240324/.test(ns)) dmnVersion = '1.5';
+
+  const idToName = new Map<string, string>();
+
+  const inputDataRaw = arr<any>(defs.inputData);
+  const inputData: DmnInputData[] = inputDataRaw.map((n) => {
+    const id = n['@_id'];
+    const name = n['@_name'];
+    if (id) idToName.set(id, name);
+    return { id, name, typeRef: n.variable?.['@_typeRef'] };
+  });
+
+  const decisionRaw = arr<any>(defs.decision);
+  for (const n of decisionRaw) {
+    if (n['@_id']) idToName.set(n['@_id'], n['@_name']);
+  }
+
+  const bkmRaw = arr<any>(defs.businessKnowledgeModel);
+  for (const n of bkmRaw) {
+    if (n['@_id']) idToName.set(n['@_id'], n['@_name']);
+  }
+  const bkms: DmnBkm[] = bkmRaw.map((n) => {
+    const enc = n.encapsulatedLogic;
+    const parameters: DmnBkmParameter[] = enc
+      ? arr<any>(enc.formalParameter).map((p) => ({
+          name: p['@_name'],
+          typeRef: p['@_typeRef'],
+        }))
+      : [];
+    let bodyText: string | undefined = enc?.literalExpression?.text;
+    // A boxed `<functionDefinition>` body is the FEEL-text equivalent of an
+    // anonymous `function(p1, ...) <body>` expression. Nested definitions
+    // produce curried lambdas.
+    if (!bodyText && enc?.functionDefinition) {
+      bodyText = functionDefToFeelText(enc.functionDefinition);
+    }
+    const bkmTable = enc?.decisionTable
+      ? parseDecisionTableXml(enc.decisionTable)
+      : undefined;
+    const bkmContext = enc?.context ? parseContextXml(enc.context) : undefined;
+    const bkmInvocation = enc?.invocation
+      ? parseInvocationXml(enc.invocation)
+      : undefined;
+    return {
+      id: n['@_id'],
+      name: n['@_name'],
+      typeRef: n.variable?.['@_typeRef'],
+      parameters,
+      bodyText,
+      decisionTable: bkmTable,
+      context: bkmContext,
+      invocation: bkmInvocation,
+    };
+  });
+
+  const resolveHref = (href: string): string => {
+    const id = href.startsWith('#') ? href.slice(1) : href;
+    return idToName.get(id) ?? id;
+  };
+
+  const decisions: DmnDecision[] = decisionRaw.map((n) => {
+    const reqs = arr<any>(n.informationRequirement);
+    const requiredInputs: string[] = [];
+    const requiredDecisions: string[] = [];
+    for (const r of reqs) {
+      if (r.requiredInput?.['@_href']) {
+        requiredInputs.push(resolveHref(r.requiredInput['@_href']));
+      } else if (r.requiredDecision?.['@_href']) {
+        requiredDecisions.push(resolveHref(r.requiredDecision['@_href']));
+      }
+    }
+    let literalExpressionText: string | undefined =
+      n.literalExpression?.text ?? undefined;
+    // Boxed `<functionDefinition>` decision body — the decision IS a lambda.
+    if (!literalExpressionText && n.functionDefinition) {
+      literalExpressionText = functionDefToFeelText(n.functionDefinition);
+    }
+    // Boxed quantified expressions `<some>` / `<every>` (DMN 1.4+).
+    if (!literalExpressionText && (n.some || n.every)) {
+      literalExpressionText = quantifiedToFeelText(n.some ?? n.every, n.some ? 'some' : 'every');
+    }
+    // Boxed `<for>` and `<filter>` follow the same shape and translate to
+    // their FEEL textual forms.
+    if (!literalExpressionText && n.for) {
+      literalExpressionText = forBoxedToFeelText(n.for);
+    }
+    if (!literalExpressionText && n.filter) {
+      literalExpressionText = filterBoxedToFeelText(n.filter);
+    }
+    if (!literalExpressionText && n.conditional) {
+      literalExpressionText = conditionalBoxedToFeelText(n.conditional);
+    }
+
+    const decisionTable = n.decisionTable
+      ? parseDecisionTableXml(n.decisionTable)
+      : undefined;
+    const context: DmnContext | undefined = n.context
+      ? parseContextXml(n.context)
+      : undefined;
+    const invocation: DmnInvocation | undefined = n.invocation
+      ? parseInvocationXml(n.invocation)
+      : undefined;
+    const relation: DmnRelation | undefined = n.relation
+      ? parseRelationXml(n.relation)
+      : undefined;
+    const listItems: string[] | undefined = n.list?.literalExpression
+      ? arr<any>(n.list.literalExpression).map((le) => String(le?.text ?? ''))
+      : undefined;
+    return {
+      id: n['@_id'],
+      name: n['@_name'],
+      typeRef: n.variable?.['@_typeRef'],
+      requiredInputs,
+      requiredDecisions,
+      literalExpressionText,
+      decisionTable,
+      context,
+      invocation,
+      relation,
+      listItems,
+    };
+  });
+
+  const decisionServiceRaw = arr<any>(defs.decisionService);
+  const decisionServices: DmnDecisionService[] = decisionServiceRaw.map((n) => ({
+    id: n['@_id'],
+    name: n['@_name'],
+    typeRef: n.variable?.['@_typeRef'],
+    outputDecisions: arr<any>(n.outputDecision)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+    inputDecisions: arr<any>(n.inputDecision)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+    inputData: arr<any>(n.inputData)
+      .map((o) => resolveHref(o['@_href'] ?? ''))
+      .filter((s) => s),
+  }));
+
+  const itemDefinitionRaw = arr<any>(defs.itemDefinition);
+  const itemDefinitions: DmnItemDefinition[] = itemDefinitionRaw.map((n) => {
+    const ovText: string | undefined = n.allowedValues?.text;
+    return {
+      name: n['@_name'] ?? '',
+      typeRef: n.typeRef ?? n.typeRef?.['#text'],
+      isCollection: n['@_isCollection'] === 'true',
+      // Keep entries as raw FEEL unary-test text so the emitter can compile
+      // ranges, comparisons, and quoted literals uniformly.
+      allowedValues: ovText
+        ? splitTopLevelCommas(String(ovText)).map((s) => s.trim())
+        : undefined,
+      components: arr<any>(n.itemComponent).map((c) => ({
+        name: c['@_name'] ?? '',
+        typeRef: c.typeRef ?? c.typeRef?.['#text'],
+        isCollection: c['@_isCollection'] === 'true',
+      })),
+    };
+  });
+
+  return {
+    name: defs['@_name'] ?? 'model',
+    inputData,
+    decisions,
+    bkms,
+    decisionServices,
+    itemDefinitions,
+    dmnVersion,
+  };
+}
