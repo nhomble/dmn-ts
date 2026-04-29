@@ -1335,7 +1335,15 @@ function emitIdent(name: string, ctx?: CompileContext): string {
   // A name that's in scope wins over a same-named builtin — `product`,
   // `count`, `number` are common parameter names that also name builtins.
   if (ctx?.inScopeNames?.has(name)) return toJsIdent(name);
-  if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
+  if (FEEL_BUILTINS[name]) {
+    // DMN 1.2 counted UTF-16 code units for `string length`; 1.3 switched
+    // to code points. Route 1.2 calls to a separate runtime helper so
+    // the canonical builtin can stay code-point oriented.
+    if (name === 'string length' && ctx?.dmnVersion === '1.2') {
+      return 'feel.string_length_v12';
+    }
+    return `feel.${FEEL_BUILTINS[name]}`;
+  }
   return toJsIdent(name);
 }
 
@@ -1408,12 +1416,23 @@ export function emitFeelNode(
         const fnName = node.fn.type === 'ident' ? node.fn.name : '';
         if (sig) {
           // FEEL: any named arg not in the signature is an error → null.
+          // Exception: in DMN 1.2, decision-service calls silently ignore
+          // unknown named args (the service still runs with the matched
+          // ones, others default to null). Builtins still short-circuit
+          // since 1.2's `abs(n:-1)` expects null.
+          const isService = !!ctx?.signatures[fnName];
+          const tolerateUnknown =
+            isService && ctx?.dmnVersion === '1.2';
           for (const na of node.namedArgs) {
-            if (!sig.includes(resolveParamAlias(fnName, na.name))) return 'null';
+            if (!sig.includes(resolveParamAlias(fnName, na.name))) {
+              if (tolerateUnknown) continue;
+              return 'null';
+            }
           }
           for (const na of node.namedArgs) {
             const canonical = resolveParamAlias(fnName, na.name);
             const idx = sig.indexOf(canonical);
+            if (idx < 0) continue; // ignored arg under tolerateUnknown
             let v = emitFeelNode(na.value, ctx);
             // DMN 1.3/1.4 split `context put`'s key arg: `key:` requires
             // a string, `keys:` requires a list. 1.5 unified both under
@@ -1428,6 +1447,15 @@ export function emitFeelNode(
             }
             while (positional.length <= idx) positional.push('undefined');
             positional[idx] = v;
+          }
+          // When unknown named args are tolerated, pad the positional array
+          // with `null` so the service receives all sig slots — its
+          // arity-strict guard would otherwise short-circuit to null.
+          if (tolerateUnknown) {
+            while (positional.length < sig.length) positional.push('null');
+            for (let i = 0; i < positional.length; i++) {
+              if (positional[i] === 'undefined') positional[i] = 'null';
+            }
           }
         } else {
           // No statically-known signature — emit a runtime call helper that

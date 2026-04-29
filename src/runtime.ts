@@ -1496,6 +1496,13 @@ export const feel: any = {
     // length 1 even though it's two UTF-16 code units in JS.
     return [...s].length;
   },
+  // DMN 1.2 counted UTF-16 code units, so a surrogate pair (emoji) had
+  // length 2. The 1.3 spec corrected this to code points.
+  string_length_v12(s: any): any {
+    s = feel.singleton(s);
+    if (typeof s !== 'string') return null;
+    return s.length;
+  },
   substring(s: any, start: any, length?: any): any {
     if (typeof s !== 'string') return null;
     // FEEL operates on code points, so split into a code-point array first
