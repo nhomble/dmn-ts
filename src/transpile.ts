@@ -862,14 +862,19 @@ function emitContextValue(
       if (params.length) localCctx.signatures[e.name] = params;
     }
   }
-  for (const e of context.entries) {
+  for (let i = 0; i < context.entries.length; i++) {
+    const e = context.entries[i];
     const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {
         lines.push(`    ${ident} = ${body};`);
       } else {
-        lines.push(`    let ${ident}: any = ${body};`);
+        // Temp-then-let: lets the RHS reference any outer binding sharing
+        // this name (BKM, decision service) without TDZ errors.
+        const tmp = `__ce_${i}`;
+        lines.push(`    const ${tmp}: any = ${body};`);
+        lines.push(`    let ${ident}: any = ${tmp};`);
         declared.add(ident);
       }
       namedKeys.push({ dmnName: e.name, ident });
@@ -935,14 +940,20 @@ function emitContextFn(
   }
   const namedKeys: { dmnName: string; ident: string }[] = [];
   let finalReturn: string | null = null;
-  for (const e of context.entries) {
+  for (let i = 0; i < context.entries.length; i++) {
+    const e = context.entries[i];
     const body = emitContextEntryBody(e, localNames, localCctx);
     if (e.name) {
       const ident = toJsIdent(e.name);
       if (declared.has(ident)) {
         lines.push(`    ${ident} = ${body};`);
       } else {
-        lines.push(`    let ${ident}: any = ${body};`);
+        // Compute the value into a temp first so the RHS can reference any
+        // outer binding (BKM, decision service) of the same name without
+        // hitting `let`'s temporal dead zone.
+        const tmp = `__ce_${i}`;
+        lines.push(`    const ${tmp}: any = ${body};`);
+        lines.push(`    let ${ident}: any = ${tmp};`);
         declared.add(ident);
       }
       namedKeys.push({ dmnName: e.name, ident });
@@ -1072,11 +1083,11 @@ function emitDecisionFn(
 }
 
 function emitDecisionService(ds: DmnDecisionService): string {
-  // Each input becomes a positional parameter. The service always returns a
-  // context keyed by output-decision name — the test harness extracts the
-  // requested field, and FEEL invocation sites (`svc()`) get the whole
-  // context which can be drilled into via `.fieldName`.
-  const inputNames = [...ds.inputDecisions, ...ds.inputData];
+  // Per DMN spec the service signature is inputData first, then input
+  // decisions (DMN13-163 / table 11.5). Single-output services unwrap to
+  // the single decision's value at FEEL invocation sites (DMN 1.3+
+  // behavior); the test harness extracts the requested output by name.
+  const inputNames = [...ds.inputData, ...ds.inputDecisions];
   const params = inputNames
     .map((n) => `${toJsIdent(n)}: any`)
     .join(', ');
@@ -1093,12 +1104,24 @@ function emitDecisionService(ds: DmnDecisionService): string {
     .map((o) => `${JSON.stringify(o)}: null`)
     .join(', ');
   const arity = inputNames.length;
-  // Arity mismatch → all outputs null. DMN signals the missing/extra
-  // bindings as an error; we mirror that as a null context.
+  // Single-output services: callers from FEEL get the unwrapped value;
+  // the runner extracts by name from the multi-output case. To support
+  // both cases uniformly we always return a context, then unwrap.
+  const isSingleOutput = ds.outputDecisions.length === 1;
+  const ret = isSingleOutput
+    ? `return decisions[${JSON.stringify(ds.outputDecisions[0])}](__svcCtx);`
+    : `return { ${calls} };`;
+  const nullRet = isSingleOutput ? `return null;` : `return { ${nullOutputs} };`;
+  // Reject when the call shape doesn't match the declared inputs — wrong
+  // arity, or any required slot left as `undefined` (vs explicit null,
+  // which is a valid FEEL value).
+  const undefinedCheck = inputNames.length
+    ? ` || ${inputNames.map((n) => `${toJsIdent(n)} === undefined`).join(' || ')}`
+    : '';
   const body = [
-    `if (arguments.length !== ${arity}) return { ${nullOutputs} };`,
+    `if (arguments.length !== ${arity}${undefinedCheck}) ${nullRet}`,
     `const __svcCtx: any = { ${ctxParts} };`,
-    `return { ${calls} };`,
+    ret,
   ].join('\n  ');
   return `function ${toJsIdent(ds.name)}(${params}): any {\n  ${body}\n}`;
 }
@@ -1194,6 +1217,9 @@ export function emitTs(model: DmnModel, opts: EmitOptions = {}): string {
     ``,
     model.decisionServices.length
       ? `export const decisionServices: Record<string, (...args: any[]) => any> = { ${model.decisionServices.map((s) => `${JSON.stringify(s.name)}: ${toJsIdent(s.name)}`).join(', ')} };`
+      : null,
+    model.decisionServices.length
+      ? `export const decisionServiceParams: Record<string, readonly string[]> = { ${model.decisionServices.map((s) => `${JSON.stringify(s.name)}: ${JSON.stringify([...s.inputData, ...s.inputDecisions])}`).join(', ')} };`
       : null,
     model.decisionServices.length ? '' : null,
   ]

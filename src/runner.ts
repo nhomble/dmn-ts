@@ -139,10 +139,12 @@ export interface CaseRunSummary {
 
 type Decisions = Record<string, (ctx: Record<string, unknown>) => unknown>;
 type DecisionServices = Record<string, (...args: unknown[]) => unknown>;
+type DecisionServiceParams = Record<string, readonly string[]>;
 
 export interface CaseModule {
   decisions?: Decisions;
   decisionServices?: DecisionServices;
+  decisionServiceParams?: DecisionServiceParams;
 }
 
 export function listTestFiles(caseDir: string): string[] {
@@ -207,9 +209,16 @@ export function runTestCases(
               record('fail', `no decision service named ${JSON.stringify(serviceName)}`);
               continue;
             }
-            actual = svc(...inputs);
-            // Services return a context keyed by output decision name; the
-            // resultNode names a specific output, so extract it for compare.
+            // Map inputNodes to service parameter positions by name when
+            // the module exports a signature; fall back to positional order
+            // for older generated modules.
+            const sig = mod?.decisionServiceParams?.[serviceName];
+            const args: unknown[] = sig
+              ? sig.map((p) => ctx[p])
+              : inputs;
+            actual = svc(...args);
+            // Multi-output services return a context keyed by output decision
+            // name; the resultNode names a specific output, so extract it.
             if (
               actual &&
               typeof actual === 'object' &&
