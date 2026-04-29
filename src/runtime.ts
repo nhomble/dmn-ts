@@ -111,7 +111,18 @@ export const feel: any = {
     if (feel.is_date_or_dt(b) && feel.is_duration(a)) {
       return feel.add_date_duration(b, a);
     }
-    if (typeof a === 'string' || typeof b === 'string') return String(a) + String(b);
+    // FEEL: same-type strict; cross-type → null. Plain string + plain string
+    // is concat; duration/date strings are excluded above.
+    if (
+      typeof a === 'string' &&
+      typeof b === 'string' &&
+      !feel.is_duration(a) &&
+      !feel.is_duration(b) &&
+      !feel.is_date_or_dt(a) &&
+      !feel.is_date_or_dt(b)
+    ) {
+      return a + b;
+    }
     if (typeof a !== 'number' || typeof b !== 'number') return null;
     return a + b;
   },
