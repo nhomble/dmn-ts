@@ -1200,12 +1200,15 @@ export function emitFeelNode(
             positional[idx] = v;
           }
         } else {
+          // No statically-known signature — emit a runtime call helper that
+          // checks the function value for an attached `__params` array
+          // (FEEL lambda) and maps named args by position.
           const props = node.namedArgs
             .map(
               (na) => `${JSON.stringify(na.name)}: ${emitFeelNode(na.value, ctx)}`,
             )
             .join(', ');
-          positional.push(`{ __named: { ${props} } }`);
+          return `feel.call_named(${emitFeelNode(node.fn, ctx)}, { ${props} })`;
         }
       }
       return `${emitFeelNode(node.fn, ctx)}(${positional.join(', ')})`;
@@ -1285,7 +1288,10 @@ export function emitFeelNode(
     }
     case 'lambda': {
       const params = node.params.map((p) => `${toJsIdent(p)}: any`).join(', ');
-      return `((${params}): any => ${emitFeelNode(node.body, ctx)})`;
+      const paramsLit = JSON.stringify(node.params);
+      // Attach the FEEL parameter names so a named-arg call site (which only
+      // sees the function value) can map names → positions at runtime.
+      return `Object.assign(((${params}): any => ${emitFeelNode(node.body, ctx)}), { __params: ${paramsLit} as readonly string[] })`;
     }
     case 'range': {
       return `feel.range(${emitFeelNode(node.lo, ctx)}, ${emitFeelNode(node.hi, ctx)}, ${node.openLow}, ${node.openHigh})`;

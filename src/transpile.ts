@@ -819,7 +819,9 @@ function emitContextEntryBody(
     const params = e.functionParameters
       .map((p) => `${toJsIdent(p.name)}: any`)
       .join(', ');
-    return `((${params}): any => (${fnBody}))`;
+    const paramNames = JSON.stringify(e.functionParameters.map((p) => p.name));
+    // Attach `__params` so a named-arg call site can map names → positions.
+    return `Object.assign(((${params}): any => (${fnBody})), { __params: ${paramNames} as readonly string[] })`;
   }
   if (e.decisionTable) {
     const body = emitDecisionTableBody(e.decisionTable, allNames, cctx);

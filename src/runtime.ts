@@ -1595,6 +1595,22 @@ export const feel: any = {
   is_defined(v: any): any {
     return v !== undefined;
   },
+  // Invoke a FEEL function value with a named-arg context. Lambdas carry an
+  // `__params` array (set by the emitter); we map names → positions and call
+  // positionally. As a fallback, pass the named-args object through.
+  call_named(fn: any, named: Record<string, unknown>): any {
+    if (typeof fn !== 'function') return null;
+    const params = (fn as any).__params as readonly string[] | undefined;
+    if (params) {
+      // Reject any name not in the signature (FEEL spec: extra named arg → null).
+      for (const k of Object.keys(named)) {
+        if (!params.includes(k)) return null;
+      }
+      const args = params.map((p) => named[p]);
+      return fn(...args);
+    }
+    return fn({ __named: named });
+  },
   // FEEL range(s) — string-form range constructor (DMN 1.5).
   // FEEL context(entries) — list of {key, value} objects → context value.
   context_fn(entries: any): any {
