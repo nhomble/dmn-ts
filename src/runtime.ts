@@ -1474,10 +1474,10 @@ export const feel: any = {
     if (jsFlagsBase === null) return null;
     const jsFlags = jsFlagsBase + 'g';
     const patStr = feel._xpath_pattern(pat, f);
-    // XPath replacement: `$0` is the full match; JS uses `$&`. Other
-    // capture refs ($1..$9) and literal `$` ($$ in JS) are compatible
-    // with XPath syntax, so we leave them as-is.
-    const jsRep = rep.replace(/\$0/g, '$&');
+    // XPath replacement: `$0` is the full match; JS uses `$&`. The `$$&`
+    // replacement string yields a literal `$&` (the `$$` is an escape for
+    // `$`), avoiding the JS engine's own interpretation of `$&`.
+    const jsRep = rep.replace(/\$0/g, '$$&');
     try {
       return s.replace(new RegExp(patStr, jsFlags), jsRep);
     } catch {
