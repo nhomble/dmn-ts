@@ -1127,14 +1127,16 @@ function referencesName(node: FeelNode, name: string): boolean {
 }
 
 function emitIdent(name: string, ctx?: CompileContext): string {
-  if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
-  const ident = toJsIdent(name);
+  // Inside a filter predicate, an unqualified name should prefer a property
+  // of the iterated item over a same-named builtin (e.g. `number` is both
+  // a builtin function and a common context field).
   if (ctx?.inFilterScope) {
-    // `typeof <bareIdent>` is the only reference form that does NOT throw on
-    // an undeclared name, so it's safe to use here as a scope probe.
+    const ident = toJsIdent(name);
+    // `typeof <bareIdent>` doesn't throw for an undeclared name — safe probe.
     return `(typeof ${ident} !== 'undefined' ? ${ident} : feel.prop(item, ${JSON.stringify(name)}))`;
   }
-  return ident;
+  if (FEEL_BUILTINS[name]) return `feel.${FEEL_BUILTINS[name]}`;
+  return toJsIdent(name);
 }
 
 // Some FEEL builtins have alternative parameter names across DMN versions

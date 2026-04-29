@@ -24,8 +24,9 @@ function smartCoerce(raw: string): unknown {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   if (raw === '' || raw === 'null') return raw === '' ? '' : null;
-  // A signed decimal that round-trips through Number is treated as number.
-  if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(raw)) {
+  // A signed decimal (also accept leading-dot like `.041`) that round-trips
+  // through Number is treated as number.
+  if (/^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(raw)) {
     const n = Number(raw);
     if (Number.isFinite(n)) return n;
   }
