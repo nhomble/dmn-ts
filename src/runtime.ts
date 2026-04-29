@@ -1032,15 +1032,21 @@ export const feel: any = {
   },
   string_length(s: any): any {
     s = feel.singleton(s);
-    return typeof s === 'string' ? s.length : null;
+    if (typeof s !== 'string') return null;
+    // FEEL counts Unicode code points, so a single emoji or astral char is
+    // length 1 even though it's two UTF-16 code units in JS.
+    return [...s].length;
   },
   substring(s: any, start: any, length?: any): any {
     if (typeof s !== 'string') return null;
+    // FEEL operates on code points, so split into a code-point array first
+    // and slice in those terms. Emoji and astral chars are 1 unit each.
+    const cps = [...s];
     let st = Number(start);
-    if (st < 0) st = s.length + st + 1;
+    if (st < 0) st = cps.length + st + 1;
     st = st - 1;
-    if (length == null || length?.__named) return s.slice(Math.max(0, st));
-    return s.slice(Math.max(0, st), Math.max(0, st) + Number(length));
+    if (length == null || length?.__named) return cps.slice(Math.max(0, st)).join('');
+    return cps.slice(Math.max(0, st), Math.max(0, st) + Number(length)).join('');
   },
   substring_before(s: any, sub: any): any {
     if (typeof s !== 'string' || typeof sub !== 'string') return null;

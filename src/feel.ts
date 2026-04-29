@@ -280,7 +280,22 @@ function matchMultiWord(
 }
 
 function isWordChar(c: string): boolean {
-  return /[A-Za-z0-9_]/.test(c);
+  if (!c) return false;
+  if (/[A-Za-z0-9_]/.test(c)) return true;
+  if (c >= '\uD800' && c <= '\uDBFF') return true;
+  return /\p{L}|\p{N}|\p{Extended_Pictographic}/u.test(c);
+}
+
+// Tests whether the code point starting at `input[i]` is a valid identifier
+// start char. Surrogate pairs (e.g. emoji like 🐎) need to be reassembled
+// before being tested against `/u` regexes.
+function isUnicodeIdentStart(input: string, i: number): boolean {
+  const c = input[i];
+  if (c >= '\uD800' && c <= '\uDBFF' && i + 1 < input.length) {
+    const cp = input.slice(i, i + 2);
+    return /\p{L}|\p{Extended_Pictographic}/u.test(cp);
+  }
+  return /\p{L}|\p{Extended_Pictographic}/u.test(c);
 }
 
 function tokenize(input: string, knownNames: string[]): Token[] {
@@ -359,6 +374,17 @@ function tokenize(input: string, knownNames: string[]): Token[] {
           else if (esc === '/') raw += '/';
           else if (esc === 'b') raw += '\b';
           else if (esc === 'f') raw += '\f';
+          else if (esc === 'u' && /^[0-9A-Fa-f]{4}/.test(input.slice(j + 2, j + 6))) {
+            // Per FEEL: `\uXXXX` is a 4-hex-digit Unicode code unit.
+            raw += String.fromCharCode(parseInt(input.slice(j + 2, j + 6), 16));
+            j += 6;
+            continue;
+          } else if (esc === 'U' && /^[0-9A-Fa-f]{6}/.test(input.slice(j + 2, j + 8))) {
+            // FEEL: `\UXXXXXX` is a 6-hex-digit Unicode code point (DMN 1.3+).
+            raw += String.fromCodePoint(parseInt(input.slice(j + 2, j + 8), 16));
+            j += 8;
+            continue;
+          }
           // Unknown escape — preserve verbatim so regex metachars like
           // `\s`, `\d`, `\w` survive into runtime regex compilation.
           else raw += '\\' + esc;
@@ -407,7 +433,10 @@ function tokenize(input: string, knownNames: string[]): Token[] {
     }
 
     // Identifier — try longest known multi-word name first, else single-word.
-    if (/[A-Za-z_]/.test(c)) {
+    // Unicode letters (and a couple of symbol classes — for emoji etc.) are
+    // valid identifier chars per the FEEL spec; surrogate pairs cover the
+    // astral-plane range like 🐎.
+    if (/[A-Za-z_]/.test(c) || isUnicodeIdentStart(input, i)) {
       let matchedName: string | null = null;
       let matchedLen = 0;
       for (const name of sortedNames) {
@@ -428,7 +457,11 @@ function tokenize(input: string, knownNames: string[]): Token[] {
         i += matchedLen;
         continue;
       }
-      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(input.slice(i));
+      // Single-token identifier — ASCII letters/digits/underscore plus
+      // Unicode letters and pictographs (emoji like 🐎). We avoid the broader
+      // `Emoji` and `So` classes because they include ASCII operator chars
+      // (`*`, etc.) which would swallow the next operator into the ident.
+      const m = /^(?:[A-Za-z_]|\p{L}|\p{Extended_Pictographic})(?:[A-Za-z0-9_]|\p{L}|\p{N}|\p{Extended_Pictographic})*/u.exec(input.slice(i));
       if (m) {
         if (KEYWORDS.has(m[0])) tokens.push({ kind: 'kw', name: m[0] });
         else tokens.push({ kind: 'ident', name: m[0] });
