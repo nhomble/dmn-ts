@@ -128,7 +128,7 @@ export const FEEL_BUILTIN_PARAMS: Record<string, string[]> = {
   // `number` for abs/even/odd specifically.
   floor: ['n'],
   ceiling: ['n'],
-  abs: ['number'],
+  abs: ['n'],
   modulo: ['dividend', 'divisor'],
   sqrt: ['number'],
   log: ['number'],
