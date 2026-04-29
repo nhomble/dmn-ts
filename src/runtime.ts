@@ -1268,7 +1268,8 @@ export const feel: any = {
     }
     return out;
   },
-  day_of_year(d: any): any {
+  day_of_year(d: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof d !== 'string') return null;
     const m = /^(-?)(\d+)-(\d{2})-(\d{2})/.exec(d);
     if (!m) return null;
@@ -1279,7 +1280,8 @@ export const feel: any = {
     const start = new Date(Date.UTC(Math.abs(y), 0, 1));
     return Math.floor((dt.getTime() - start.getTime()) / 86_400_000) + 1;
   },
-  day_of_week(d: any): any {
+  day_of_week(d: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof d !== 'string') return null;
     const m = /^(-?)(\d+)-(\d{2})-(\d{2})/.exec(d);
     if (!m) return null;
@@ -1291,7 +1293,8 @@ export const feel: any = {
     const names = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     return names[dt.getUTCDay()];
   },
-  month_of_year(d: any): any {
+  month_of_year(d: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof d !== 'string') return null;
     const m = /^-?\d+-(\d{2})-\d{2}/.exec(d);
     if (!m) return null;
@@ -1391,7 +1394,8 @@ export const feel: any = {
     }
     return null;
   },
-  week_of_year(d: any): any {
+  week_of_year(d: any, ...rest: any[]): any {
+    if (rest.length > 0) return null;
     if (typeof d !== 'string') return null;
     const m = /^(-?)(\d+)-(\d{2})-(\d{2})/.exec(d);
     if (!m) return null;
@@ -1654,29 +1658,46 @@ export const feel: any = {
     if (s < -6111 || s > 6176) return false;
     return true;
   },
+  // When the requested precision exceeds what JS doubles can represent
+  // (`10^scale` overflows or underflows), the rounding is a no-op — JS
+  // can't represent more digits than the value already carries.
+  _roundScaled(n: number, scale: number, mode: 'up' | 'down' | 'half-up' | 'half-down'): number {
+    const f = Math.pow(10, scale);
+    if (!Number.isFinite(f) || f === 0) return n;
+    const x = n * f;
+    if (!Number.isFinite(x)) return n;
+    let rounded: number;
+    switch (mode) {
+      case 'up':
+        rounded = x >= 0 ? Math.ceil(x) : Math.floor(x);
+        break;
+      case 'down':
+        rounded = x >= 0 ? Math.floor(x) : Math.ceil(x);
+        break;
+      case 'half-up':
+        rounded = x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5);
+        break;
+      case 'half-down':
+        rounded = x >= 0 ? Math.ceil(x - 0.5) : -Math.ceil(-x - 0.5);
+        break;
+    }
+    return rounded / f;
+  },
   round_up(n: any, scale: any, ...rest: any[]): any {
     if (!feel._checkRound(n, scale, ...rest)) return null;
-    const f = Math.pow(10, Math.trunc(scale));
-    const x = (n as number) * f;
-    return (x >= 0 ? Math.ceil(x) : Math.floor(x)) / f;
+    return feel._roundScaled(n as number, Math.trunc(scale), 'up');
   },
   round_down(n: any, scale: any, ...rest: any[]): any {
     if (!feel._checkRound(n, scale, ...rest)) return null;
-    const f = Math.pow(10, Math.trunc(scale));
-    const x = (n as number) * f;
-    return (x >= 0 ? Math.floor(x) : Math.ceil(x)) / f;
+    return feel._roundScaled(n as number, Math.trunc(scale), 'down');
   },
   round_half_up(n: any, scale: any, ...rest: any[]): any {
     if (!feel._checkRound(n, scale, ...rest)) return null;
-    const f = Math.pow(10, Math.trunc(scale));
-    const x = (n as number) * f;
-    return (x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5)) / f;
+    return feel._roundScaled(n as number, Math.trunc(scale), 'half-up');
   },
   round_half_down(n: any, scale: any, ...rest: any[]): any {
     if (!feel._checkRound(n, scale, ...rest)) return null;
-    const f = Math.pow(10, Math.trunc(scale));
-    const x = (n as number) * f;
-    return (x >= 0 ? Math.ceil(x - 0.5) : -Math.ceil(-x - 0.5)) / f;
+    return feel._roundScaled(n as number, Math.trunc(scale), 'half-down');
   },
   decimal(n: any, scale: any): any {
     if (n == null || scale == null) return null;
@@ -1900,14 +1921,22 @@ export const feel: any = {
     if (a === null || b === null) return false;
     if (typeof a !== typeof b) return false;
     if (typeof a === 'number') return a === b;
-    // For datetimes/times, `is` checks wall-clock + zone match (not the
-    // instant), so "12:00:00-01:00" and "17:00:00+04:00" are NOT `is`-equal
-    // even though they're the same instant.
     if (typeof a === 'string' && typeof b === 'string') {
+      // For datetimes/times, `is` checks wall-clock + zone match (not the
+      // instant), so "12:00:00-01:00" and "17:00:00+04:00" are NOT
+      // `is`-equal even though they're the same instant.
       const isDt = (s: string) => /^-?\d{4,9}-\d{2}-\d{2}T/.test(s);
-      const isTime = (s: string) => feel.is_time(s);
-      if ((isDt(a) && isDt(b)) || (isTime(a) && isTime(b))) {
-        // Compare verbatim — but normalize fractional seconds.
+      if ((isDt(a) && isDt(b)) || (feel.is_time(a) && feel.is_time(b))) {
+        return a === b;
+      }
+      // For durations, `is` is family-strict: a years-months duration is
+      // never `is`-equal to a days-time duration even when both are zero
+      // (`P0Y` vs `P0D`). `feel.eq` treats zero specially across
+      // families; that doesn't carry over here.
+      if (/^-?P/.test(a) && /^-?P/.test(b)) {
+        const aIsYm = feel.ym_to_months(a) != null;
+        const bIsYm = feel.ym_to_months(b) != null;
+        if (aIsYm !== bIsYm) return false;
         return a === b;
       }
     }

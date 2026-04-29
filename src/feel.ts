@@ -1326,8 +1326,15 @@ export function emitFeelNode(
     }
     case 'member':
       return `feel.prop(${emitFeelNode(node.obj, ctx)}, ${JSON.stringify(node.name)})`;
-    case 'if':
-      return `((${emitFeelNode(node.cond, ctx)}) ? (${emitFeelNode(node.thenE, ctx)}) : (${emitFeelNode(node.elseE, ctx)}))`;
+    case 'if': {
+      // FEEL `if` requires a boolean condition — anything else (string,
+      // number, null, list, …) makes the whole expression null. JS truthy
+      // semantics would otherwise pick `then` for any non-empty string.
+      const cond = emitFeelNode(node.cond, ctx);
+      const thenE = emitFeelNode(node.thenE, ctx);
+      const elseE = emitFeelNode(node.elseE, ctx);
+      return `(() => { const __c: any = (${cond}); return __c === true ? (${thenE}) : __c === false ? (${elseE}) : null; })()`;
+    }
     case 'list':
       return `[${node.items.map((i) => emitFeelNode(i, ctx)).join(', ')}]`;
     case 'context': {
