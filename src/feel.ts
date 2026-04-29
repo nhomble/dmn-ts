@@ -1137,12 +1137,23 @@ function emitIdent(name: string, ctx?: CompileContext): string {
   return ident;
 }
 
+// Some FEEL builtins have alternative parameter names across DMN versions
+// (DMN 1.5 added `match` as a synonym for `position` in `list replace`, etc.).
+// Map alternative names to the canonical name in FEEL_BUILTIN_PARAMS.
+const FEEL_PARAM_ALIASES: Record<string, Record<string, string>> = {
+  'list replace': { match: 'position' },
+};
+
 function lookupSignature(
   fn: FeelNode,
   ctx: CompileContext,
 ): string[] | undefined {
   if (fn.type !== 'ident') return undefined;
   return ctx.signatures[fn.name] ?? FEEL_BUILTIN_PARAMS[fn.name];
+}
+
+function resolveParamAlias(fnName: string, paramName: string): string {
+  return FEEL_PARAM_ALIASES[fnName]?.[paramName] ?? paramName;
 }
 
 export function emitFeelNode(
@@ -1174,13 +1185,15 @@ export function emitFeelNode(
       const positional = node.args.map((a) => emitFeelNode(a, ctx));
       if (node.namedArgs && node.namedArgs.length) {
         const sig = lookupSignature(node.fn, ctx);
+        const fnName = node.fn.type === 'ident' ? node.fn.name : '';
         if (sig) {
           // FEEL: any named arg not in the signature is an error → null.
           for (const na of node.namedArgs) {
-            if (!sig.includes(na.name)) return 'null';
+            if (!sig.includes(resolveParamAlias(fnName, na.name))) return 'null';
           }
           for (const na of node.namedArgs) {
-            const idx = sig.indexOf(na.name);
+            const canonical = resolveParamAlias(fnName, na.name);
+            const idx = sig.indexOf(canonical);
             const v = emitFeelNode(na.value, ctx);
             while (positional.length <= idx) positional.push('undefined');
             positional[idx] = v;

@@ -1007,6 +1007,8 @@ export const feel: any = {
     // predicate `(item, newItem) -> boolean` that selects which entries
     // to replace.
     if (typeof position === 'function') {
+      // Match function must accept exactly two args (item, newItem).
+      if (position.length !== 2) return null;
       try {
         return list.map((it: any) =>
           position(it, newItem) === true ? newItem : it,
@@ -1577,6 +1579,15 @@ export const feel: any = {
   // FEEL range(s) — string-form range constructor (DMN 1.5).
   // FEEL context(entries) — list of {key, value} objects → context value.
   context_fn(entries: any): any {
+    // FEEL singleton-list rule: a single context flows in as `[context]`.
+    if (
+      entries &&
+      typeof entries === 'object' &&
+      !Array.isArray(entries) &&
+      !(entries as any).__feel
+    ) {
+      entries = [entries];
+    }
     if (!Array.isArray(entries)) return null;
     const out: Record<string, unknown> = {};
     for (const e of entries) {
@@ -1584,6 +1595,8 @@ export const feel: any = {
         return null;
       const k = (e as any).key;
       if (Object.prototype.hasOwnProperty.call(out, k)) return null;
+      // Spec: a missing `value` (the entry has only `key`) → null result.
+      if (!('value' in (e as object))) return null;
       out[k] = (e as any).value;
     }
     return out;
