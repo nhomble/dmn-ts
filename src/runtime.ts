@@ -457,6 +457,30 @@ export const feel: any = {
         return a.replace(/\.\d+/, '') === b.replace(/\.\d+/, '');
       }
       if (isTime) {
+        // Compare instants when both carry zone info — including IANA
+        // zones, which we resolve via the current date for offset lookup.
+        const tzA = /(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.exec(a);
+        const tzB = /(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?|@[A-Za-z_+\-/]+)$/.exec(b);
+        if (tzA && tzB) {
+          const refDate = '1970-01-01';
+          const msA = feel._dt_to_utc_ms(refDate, a.slice(0, tzA.index), tzA[0]);
+          const msB = feel._dt_to_utc_ms(refDate, b.slice(0, tzB.index), tzB[0]);
+          let aMs = msA;
+          let bMs = msB;
+          if (typeof aMs === 'number' && tzA[0].startsWith('@')) {
+            const off = feel._iana_offset_min(new Date(aMs), tzA[0].slice(1));
+            if (off == null) return null;
+            aMs -= off * 60_000;
+          }
+          if (typeof bMs === 'number' && tzB[0].startsWith('@')) {
+            const off = feel._iana_offset_min(new Date(bMs), tzB[0].slice(1));
+            if (off == null) return null;
+            bMs -= off * 60_000;
+          }
+          if (typeof aMs === 'number' && typeof bMs === 'number') {
+            return Math.floor(aMs / 1000) === Math.floor(bMs / 1000);
+          }
+        }
         return a.replace(/\.\d+/, '') === b.replace(/\.\d+/, '');
       }
     }
