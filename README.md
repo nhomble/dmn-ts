@@ -5,7 +5,7 @@ Execute DMN as normal ESM. Each `.dmn` file is transpiled at build time into a s
 ### Example 
 
 ```
-npm run run -- examples/loan-approval.dmn -o examples/out/loan-approval
+npm run cli -- examples/loan-approval.dmn -o examples/out/loan-approval
 
 # the output is a regular npm package
 cd examples/out/loan-approval
